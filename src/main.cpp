@@ -36,8 +36,24 @@ const uint8_t kBuzzerPin = 21;
 const uint8_t kRGBLedPin = 38;
 
 
+// A simple function to perform a reboot sequence on a normally open or normally closed relay 
+enum ContactType {NO, NC};
+void reboot_sequence(SmartSwitchController* controller, uint32_t on_ms, ContactType contact_type) {
+  if (contact_type == NC) {
+  controller->emit(true);
+  event_loop()->onDelay(on_ms, [controller] { controller->emit(false); });
+  }
+  else {
+  controller->emit(false);
+  event_loop()->onDelay(on_ms, [controller] { controller->emit(true); });
+  }
+}
+
 SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
-                                        String config_path_sk_output) {
+                                        String config_path_sk_output, 
+                                        ContactType contact_type = NC,
+                                        int reboot_time_ms = 60000
+                              ) {
   // Initialize the relay pin to output
   pinMode(pin, OUTPUT);
   // Set the relay GPIO pins to LOW (off) initially
@@ -63,21 +79,35 @@ SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
   load_switch->connect_to(new Repeat<bool, bool>(10000))
       ->connect_to(new SKOutputBool(sk_path, config_path_sk_output));
 
+
+  // Setup a ValueListener so changing the value with a SK plugin can cause
+  // a reboot sequence for in-net automated network monitoring    
+  String reboot_path = "electrical.commands.reboot." 
+      + config_path_sk_output.substring(8, config_path_sk_output.length()); 
+
+  auto* reboot_listener = new SKValueListener<bool>(reboot_path);
+    reboot_listener->connect_to(new LambdaConsumer<bool>(
+      [controller, contact_type, reboot_time_ms](bool value) {
+    if (value) {
+        reboot_sequence(controller, reboot_time_ms, contact_type);
+    }
+    }));
+
+  // Setup a PutRequestListener so that any device on the network
+  // can cause a reboot sequence for in-net automated network monitoring
+  auto* put_reboot_listener = new BoolSKPutRequestListener(reboot_path);
+    put_reboot_listener->connect_to(new LambdaConsumer<bool>(
+      [controller, contact_type, reboot_time_ms](bool value) {
+    if (value) {
+        reboot_sequence(controller, reboot_time_ms, contact_type);
+    }
+    }));
+    
+    
   return controller;
 }
 
-// A simple function to perform a reboot sequence on a normally open or normally closed relay 
-enum ContactType {NO, NC};
-void reboot_sequence(SmartSwitchController* controller, uint32_t on_ms, ContactType contact_type) {
-  if (contact_type == NC) {
-  controller->emit(true);
-  event_loop()->onDelay(on_ms, [controller] { controller->emit(false); });
-  }
-  else {
-  controller->emit(false);
-  event_loop()->onDelay(on_ms, [controller] { controller->emit(true); });
-  }
-}
+
 
 
 // The setup function performs one-time application initialization.
@@ -98,58 +128,18 @@ void setup() {
                     
   // write up everything to Signal K
   auto relay_controller1 = initialize_relay(kRelayPin1, "electrical.reboot1.navnet.state",
-                   "sensesp-navnet");
-
+                   "sensesp-navnet", NC, 60000);
   auto relay_controller2 = initialize_relay(kRelayPin2, "electrical.reboot1.powernet.state",
-                   "sensesp-powrenet");
+                   "sensesp-powrenet", NC, 60000);
   auto relay_controller3 = initialize_relay(kRelayPin3, "electrical.reboot1.maretronPC.state",
-                   "sensesp-maretronPC");
+                   "sensesp-maretronPC", NC, 60000);
   auto relay_controller4 = initialize_relay(kRelayPin4, "electrical.reboot1.winPC.state",
-                   "sensesp-winPC");
+                   "sensesp-winPC", NC, 60000);
   auto relay_controller5 = initialize_relay(kRelayPin5, "electrical.reboot1.linPC.state",
-                   "sensesp-linPC");
+                   "sensesp-linPC", NC, 60000);
   auto relay_controller6 = initialize_relay(kRelayPin6, "electrical.reboot1.relay6.state",
-                   "sensesp-relay6");
+                   "sensesp-relay6", NO, 60000);
 
-
-// Set up listeners for reboot commands from Signal K
-
-auto* reboot_listener_navnet = new SKValueListener<bool>("electrical.commands.reboot.navnet");
-reboot_listener_navnet->connect_to(new LambdaConsumer<bool>([relay_controller1](bool value) {
-    if (value) {
-        reboot_sequence(relay_controller1, 60000, ContactType::NC);
-    }
-}));
-auto* reboot_listener_powernet = new SKValueListener<bool>("electrical.commands.reboot.powernet");
-reboot_listener_powernet->connect_to(new LambdaConsumer<bool>([relay_controller2](bool value) {
-    if (value) {
-        reboot_sequence(relay_controller2, 60000, ContactType::NC);
-    }
-}));
-auto* reboot_listener_maretronPC = new SKValueListener<bool>("electrical.commands.reboot.maretronPC");
-reboot_listener_maretronPC->connect_to(new LambdaConsumer<bool>([relay_controller3](bool value) {
-    if (value) {
-        reboot_sequence(relay_controller3, 60000, ContactType::NC);
-    }
-}));
-auto* reboot_listener_winPC = new SKValueListener<bool>("electrical.commands.reboot.winPC");
-reboot_listener_winPC->connect_to(new LambdaConsumer<bool>([relay_controller4](bool value) {
-    if (value) {
-        reboot_sequence(relay_controller4, 60000, ContactType::NC);
-    }
-}));
-auto* reboot_listener_linPC = new SKValueListener<bool>("electrical.commands.reboot.linPC");
-reboot_listener_linPC->connect_to(new LambdaConsumer<bool>([relay_controller5](bool value) {
-    if (value) {
-        reboot_sequence(relay_controller5, 60000, ContactType::NC);
-    }
-}));
-auto* reboot_listener_relay6 = new SKValueListener<bool>("electrical.commands.reboot.relay6");
-reboot_listener_relay6->connect_to(new LambdaConsumer<bool>([relay_controller6](bool value) {
-    if (value) {
-        reboot_sequence(relay_controller6, 60000, ContactType::NO);
-    }
-}));
 
     while(true)
     {
