@@ -1,12 +1,3 @@
-// Signal K application template file.
-//
-// This application demonstrates core SensESP concepts in a very
-// concise manner. You can build and upload the application as is
-// and observe the value changes on the serial port monitor.
-//
-// You can use this source file as a basis for your own projects.
-// Remove the parts that are not relevant to you, and add your own code
-// for external hardware libraries.
 
 #include <memory>
 
@@ -25,11 +16,6 @@
 
 using namespace sensesp;
 
-////////////////////////////////////////////////////////
-// Config Section - Edit these to match your application
-// Name the device and the relays
-// the paths for SignalK will be generated as a standard format
-// you can change the format in the getSkPath and getSkOutput functions
 
 
 struct RelayInfo {
@@ -39,8 +25,17 @@ struct RelayInfo {
   unsigned long ms;   // Reboot time in milliseconds
 };
 
-const String groupName = "reboot2";
+////////////////////////////////////////////////////////
+// Config Section - Edit these to match your application
+// Name the device and the relays
+// the paths for SignalK will be generated as a standard format
+// you can change the format in the getSkPath and getSkOutput functions
+////////////////////////////////////////////////////////
+
+
+const String groupName = "reboot2";  // Name of this group of relays - used in the Signal K path
 RelayInfo relays[] = {
+// Pin  Name            NO/NC Reboot time in milliseconds
   { 1,"starlinkInverter", true, 60000 },   // true = NO, false = NC
   { 2,"cellModem", false, 60000 },
   { 41,"pepRouter", false, 60000 },
@@ -57,7 +52,12 @@ String getSkOutput(const String& relayName) {
   return "sensesp-" + relayName;
 }
 
-// A simple function to perform a reboot sequence on a normally open or normally closed relay 
+////////////////////////////////////////////////////////
+// Function to perform a reboot sequence on a normally open or normally closed relay 
+// along with a SignalK plugin to monitor devices it can set a reboot
+// command that will trigger the reboot sequence
+// Ive also set up a Put listener so any device on the network can trigger a reboot
+// but haven't got it working yet.
 void reboot_sequence(SmartSwitchController* controller, uint32_t on_ms, bool contact_type) {
   if (!contact_type) {
   controller->emit(true);
@@ -144,7 +144,7 @@ void setup() {
                     //->set_sk_server("192.168.10.3", 80)
                     ->get_app();
                     
-  // write up everything to Signal K
+  // initialize the relays and write up everything to Signal K
 
   auto relay_controller1 = initialize_relay(relays[0].pin, 
                         getSkPath(relays[0].name),
