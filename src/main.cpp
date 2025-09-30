@@ -25,21 +25,41 @@
 
 using namespace sensesp;
 
-// relay GPIO pins
-const uint8_t kRelayPin1 = 1;
-const uint8_t kRelayPin2 = 2;
-const uint8_t kRelayPin3 = 41;
-const uint8_t kRelayPin4 = 42;
-const uint8_t kRelayPin5 = 45;
-const uint8_t kRelayPin6 = 46;
-const uint8_t kBuzzerPin = 21;
-const uint8_t kRGBLedPin = 38;
+////////////////////////////////////////////////////////
+// Config Section - Edit these to match your application
+// Name the device and the relays
+// the paths for SignalK will be generated as a standard format
+// you can change the format in the getSkPath and getSkOutput functions
 
+
+struct RelayInfo {
+  uint8_t pin;       // GPIO pin number
+  String name;        // Relay name
+  bool NO;            // NO or NC
+  unsigned long ms;   // Reboot time in milliseconds
+};
+
+const String groupName = "reboot2";
+RelayInfo relays[] = {
+  { 1,"starlinkInverter", true, 60000 },   // true = NO, false = NC
+  { 2,"cellModem", false, 60000 },
+  { 41,"pepRouter", false, 60000 },
+  { 42,"dataHub", false, 60000 },
+  { 45,"fleetOne", false, 60000 },
+  { 46,"relay6", true, 60000 }
+};
+
+String getSkPath(const String& relayName) {
+  return "electrical." + groupName + "." + relayName + ".state";
+}
+
+String getSkOutput(const String& relayName) {
+  return "sensesp-" + relayName;
+}
 
 // A simple function to perform a reboot sequence on a normally open or normally closed relay 
-enum ContactType {NO, NC};
-void reboot_sequence(SmartSwitchController* controller, uint32_t on_ms, ContactType contact_type) {
-  if (contact_type == NC) {
+void reboot_sequence(SmartSwitchController* controller, uint32_t on_ms, bool contact_type) {
+  if (!contact_type) {
   controller->emit(true);
   event_loop()->onDelay(on_ms, [controller] { controller->emit(false); });
   }
@@ -51,7 +71,7 @@ void reboot_sequence(SmartSwitchController* controller, uint32_t on_ms, ContactT
 
 SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
                                         String config_path_sk_output, 
-                                        ContactType contact_type = NC,
+                                        bool contact_type = false,
                                         int reboot_time_ms = 60000
                               ) {
   // Initialize the relay pin to output
@@ -94,7 +114,7 @@ SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
     }));
 
   // Setup a PutRequestListener so that any device on the network
-  // can cause a reboot sequence for in-net automated network monitoring
+  // can cause a reboot sequence for manual network control
   auto* put_reboot_listener = new BoolSKPutRequestListener(reboot_path);
     put_reboot_listener->connect_to(new LambdaConsumer<bool>(
       [controller, contact_type, reboot_time_ms](bool value) {
@@ -109,16 +129,14 @@ SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
 
 
 
-
 // The setup function performs one-time application initialization.
 void setup() {
   SetupLogging(ESP_LOG_DEBUG);
-
   // Construct the global SensESPApp() object
   SensESPAppBuilder builder;
   sensesp_app = (&builder)
                     // Set a custom hostname for the app.
-                    ->set_hostname("reboot1")
+                    ->set_hostname(groupName)
                     // Optionally, hard-code the WiFi and Signal K server
                     // settings. This is normally not needed.
                     //->set_wifi_client("My WiFi SSID", "my_wifi_password")
@@ -127,18 +145,31 @@ void setup() {
                     ->get_app();
                     
   // write up everything to Signal K
-  auto relay_controller1 = initialize_relay(kRelayPin1, "electrical.reboot1.navnet.state",
-                   "sensesp-navnet", NC, 60000);
-  auto relay_controller2 = initialize_relay(kRelayPin2, "electrical.reboot1.powernet.state",
-                   "sensesp-powrenet", NC, 60000);
-  auto relay_controller3 = initialize_relay(kRelayPin3, "electrical.reboot1.maretronPC.state",
-                   "sensesp-maretronPC", NC, 60000);
-  auto relay_controller4 = initialize_relay(kRelayPin4, "electrical.reboot1.winPC.state",
-                   "sensesp-winPC", NC, 60000);
-  auto relay_controller5 = initialize_relay(kRelayPin5, "electrical.reboot1.linPC.state",
-                   "sensesp-linPC", NC, 60000);
-  auto relay_controller6 = initialize_relay(kRelayPin6, "electrical.reboot1.relay6.state",
-                   "sensesp-relay6", NO, 60000);
+
+  auto relay_controller1 = initialize_relay(relays[0].pin, 
+                        getSkPath(relays[0].name),
+                        getSkOutput(relays[0].name), 
+                        relays[0].NO, relays[0].ms);
+  auto relay_controller2 = initialize_relay(relays[1].pin, 
+                        getSkPath(relays[1].name),
+                        getSkOutput(relays[1].name), 
+                        relays[1].NO, relays[1].ms);
+  auto relay_controller3 = initialize_relay(relays[2].pin, 
+                        getSkPath(relays[2].name),
+                        getSkOutput(relays[2].name), 
+                        relays[2].NO, relays[2].ms);
+  auto relay_controller4 = initialize_relay(relays[3].pin, 
+                        getSkPath(relays[3].name),
+                        getSkOutput(relays[3].name), 
+                        relays[3].NO, relays[3].ms);
+  auto relay_controller5 = initialize_relay(relays[4].pin, 
+                        getSkPath(relays[4].name),
+                        getSkOutput(relays[4].name), 
+                        relays[4].NO, relays[4].ms);
+  auto relay_controller6 = initialize_relay(relays[5].pin, 
+                        getSkPath(relays[5].name),
+                        getSkOutput(relays[5].name), 
+                        relays[5].NO, relays[5].ms);
 
 
     while(true)
