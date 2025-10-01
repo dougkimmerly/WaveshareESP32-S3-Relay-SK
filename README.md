@@ -1,6 +1,6 @@
 # SensESP Remote Switching Controller
 
-This repository is specific to the Waveshare 6 relay module.
+This repository is specific to the WaveShare 6 relay module.
 https://www.waveshare.com/wiki/ESP32-S3-Relay-6CH easily available at Amazon. It can likely be adapted to other devices.
 
 It uses the SensESP framework to connect to a SignalK server.
@@ -9,11 +9,11 @@ the WiFi access point with the same name as the device. The password is `thisisf
 
 Comprehensive documentation for SensESP, including how to get started with your own project, is available at the [SensESP documentation site](https://signalk.org/SensESP/).
 
-This allows you to control the six relays using PUT requests from any device on your network it works extremely well with the SKipper app https://www.skipperapp.net/
+This allows you to control the six relays using PUT requests from any device on your network. It works extremely well with the SKipper app https://www.skipperapp.net/
 
-It can also be used for network monitoring and perform rebooting of stuck devices. Using a SignalK plugin to monitor network devices and changing of a value on the SignalK server listened to by this device (default "electrical.commands.reboot.+deviceName"). Will initiate the reboot sequence of the relay. Because the power on and off are locally controlled on this device things like modems and routers that are critical to connectivity can be safely restarted remotely or automatically.
+It can also be used for network monitoring and perform rebooting of stuck devices. Using a SignalK plugin to monitor network devices and changing of a value on the SignalK server listened to by this device (default "electrical.commands.reboot.+relayName"). Will initiate the reboot sequence of the relay. Because the power on and off are locally controlled on this device things like modems and routers that are critical to connectivity can be safely restarted remotely or automatically. When using to monitor network devices use the NC contact on the WaveShare. This way your device is always on independent of the status of the WaveShare and only turned off if the WaveShare successfully switches.
 
-As well automatic control can be achieved by a SignalK plugin to schedule or react to events by changing a value on the SignalK that is listened to by this device. (default "electrical.commands.switch.+deviceName")
+As well automatic control can be achieved by a SignalK plugin to schedule or react to events by changing a value in SignalK that is listened to by this device. (default "electrical.commands.switch.+relayName")
 
 **For simple installation**, change the section in `main.cpp` that defines the **group name** and **relay names**. Then build and upload to the Waveshare device and connect it to your network and SignalK server.
 
@@ -26,12 +26,12 @@ As well automatic control can be achieved by a SignalK plugin to schedule or rea
 const String groupName = "`reboot2`"; // **Group name used in Signal K path**
 
 RelayInfo relays[] = {
-  // Pin  Name               NO/NC    Reboot time (ms)
+  // Pin  Name                  NO    Reboot time (ms)  (true=NO false=NC)
   { 1,  "`starlinkInverter`",  true,  60000 }, // **Relay for starlinkInverter**
-  { 2,  "`cellModem`",           false, 60000 }, // **Relay for cellModem**
-  { 41, "`pepRouter`",           false, 60000 }, // **Relay for pepRouter**
-  { 42, "`dataHub`",             false, 60000 }, // **Relay for dataHub**
-  { 45, "`fleetOne`",            false, 60000 }, // **Relay for fleetOne**
-  { 46, "`relay6`",                true,  60000 }  // **Relay for relay6**
+  { 2,  "`cellModem`",         false, 60000 }, // **Relay for cellModem**
+  { 41, "`pepRouter`",         false, 60000 }, // **Relay for pepRouter**
+  { 42, "`dataHub`",           false, 60000 }, // **Relay for dataHub**
+  { 45, "`fleetOne`",          false, 60000 }, // **Relay for fleetOne**
+  { 46, "`relay6`",            true,  60000 }  // **Relay for relay6**
 };
 ```

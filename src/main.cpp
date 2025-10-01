@@ -27,10 +27,11 @@ struct RelayInfo {
 
 ////////////////////////////////////////////////////////
 // Config Section - Edit these to match your application
-// Name the device and the relays
+// Change the groupName and the relayNames
 // the paths for SignalK will be generated as a standard format
-// you can change the format in the getSkPath, getSkOutput functions
-// and the reboot_path variable in the initialize_relay function
+// you can change the format in the getSkPath, getSkOutput functions,
+// and the sk_switch_path and reboot_path variables 
+// in the initialize_relay function
 ////////////////////////////////////////////////////////
 
 
@@ -102,10 +103,10 @@ SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
 
   // Setup a ValueListener so changing the value with a SK plugin can cause
   // the relay to turn on or off
-  String sk_path2 = "electrical.commands.switch."
+  String sk_switch_path = "electrical.commands.switch."
       + config_path_sk_output.substring(8, config_path_sk_output.length());  
 
-  auto* sk_listener2 = new SKValueListener<String>(sk_path2);
+  auto* sk_listener2 = new SKValueListener<String>(sk_switch_path);
     sk_listener2->connect_to(controller->truthy_string_consumer_);  
 
   // Setup a ValueListener so changing the value with a SK plugin can cause
