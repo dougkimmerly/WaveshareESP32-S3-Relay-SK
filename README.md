@@ -15,17 +15,23 @@ It can also be used for network monitoring and perform rebooting of stuck device
 
 As well automatic control can be achieved by a SignalK plugin to schedule or react to events by changing a value on the SignalK that is listened to by this device. (default "electrical.commands.switch.<deviceName>")
 
-For simple installation change the section in main.cpp that defines the relay group name and the names of the relays. Then build and upload to the waveshare device.
+**For simple installation**, change the section in `main.cpp` that defines the **group name** and **relay names**. Then build and upload to the Waveshare device.
 
-const String groupName = "<span style=\"color: red;\">reboot2</span>"; // Name of this group of relays - used in the Signal K path
+---
 
-RelayInfo relays[] = {  
- Pin Name NO/NC Reboot time in milliseconds
+**Example:**
 
-{ 1,"starlinkInverter", true, 60000 }, // true = NO, false = NC  
-{ 2,"cellModem", false, 60000 },  
-{ 41,"pepRouter", false, 60000 },  
-{ 42,"dataHub", false, 60000 },  
-{ 45,"fleetOne", false, 60000 },  
-{ 46,"relay6", true, 60000 }  
-}
+```cpp
+// Change the group name here:
+const String groupName = "`reboot2`"; // **Group name used in Signal K path**
+
+RelayInfo relays[] = {
+  // Pin  Name               NO/NC    Reboot time (ms)
+  { 1,  "`starlinkInverter`",  true,  60000 }, // **Relay for starlinkInverter**
+  { 2,  "`cellModem`",           false, 60000 }, // **Relay for cellModem**
+  { 41, "`pepRouter`",           false, 60000 }, // **Relay for pepRouter**
+  { 42, "`dataHub`",             false, 60000 }, // **Relay for dataHub**
+  { 45, "`fleetOne`",            false, 60000 }, // **Relay for fleetOne**
+  { 46, "`relay6`",                true,  60000 }  // **Relay for relay6**
+};
+```
