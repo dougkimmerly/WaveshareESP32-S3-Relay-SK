@@ -100,6 +100,13 @@ SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
   load_switch->connect_to(new Repeat<bool, bool>(10000))
       ->connect_to(new SKOutputBool(sk_path, config_path_sk_output));
 
+  // Setup a ValueListener so changing the value with a SK plugin can cause
+  // the relay to turn on or off
+  String sk_path2 = "electrical.commands.switch."
+      + config_path_sk_output.substring(8, config_path_sk_output.length());  
+
+  auto* sk_listener2 = new SKValueListener<String>(sk_path2);
+    sk_listener2->connect_to(controller->truthy_string_consumer_);  
 
   // Setup a ValueListener so changing the value with a SK plugin can cause
   // a reboot sequence for in-net automated network monitoring    
