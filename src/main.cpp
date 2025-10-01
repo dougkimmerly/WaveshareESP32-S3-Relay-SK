@@ -29,7 +29,8 @@ struct RelayInfo {
 // Config Section - Edit these to match your application
 // Name the device and the relays
 // the paths for SignalK will be generated as a standard format
-// you can change the format in the getSkPath and getSkOutput functions
+// you can change the format in the getSkPath, getSkOutput functions
+// and the reboot_path variable in the initialize_relay function
 ////////////////////////////////////////////////////////
 
 
@@ -129,7 +130,7 @@ SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
 
 
 
-// The setup function performs one-time application initialization.
+
 void setup() {
   SetupLogging(ESP_LOG_DEBUG);
   // Construct the global SensESPApp() object
