@@ -17,10 +17,10 @@ As well automatic control can be achieved by a SignalK plugin to schedule or rea
 
 For simple installation change the section in main.cpp that defines the relay group name and the names of the relays. Then build and upload to the waveshare device.
 
-const String groupName = "reboot2"; // Name of this group of relays - used in the Signal K path
+const String groupName = "<span style="color: red;">reboot2</span>"; // Name of this group of relays - used in the Signal K path
 
-RelayInfo relays[] = {
-// Pin Name NO/NC Reboot time in milliseconds
+RelayInfo relays[] = {  
+ Pin Name NO/NC Reboot time in milliseconds
 
 { 1,"starlinkInverter", true, 60000 }, // true = NO, false = NC  
 { 2,"cellModem", false, 60000 },  
