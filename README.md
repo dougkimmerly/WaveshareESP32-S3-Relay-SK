@@ -27,11 +27,11 @@ const String groupName = "`reboot2`"; // **Group name used in Signal K path**
 
 RelayInfo relays[] = {
   // Pin  Name                  NO    Reboot time (ms)  (true=NO false=NC)
-  { 1,  "`starlinkInverter`",  true,  60000 }, // **Relay for starlinkInverter**
-  { 2,  "`cellModem`",         false, 60000 }, // **Relay for cellModem**
-  { 41, "`pepRouter`",         false, 60000 }, // **Relay for pepRouter**
-  { 42, "`dataHub`",           false, 60000 }, // **Relay for dataHub**
-  { 45, "`fleetOne`",          false, 60000 }, // **Relay for fleetOne**
-  { 46, "`relay6`",            true,  60000 }  // **Relay for relay6**
+  { 1,  "`starlinkInverter`",  true,  60000 }, // **Relay 1**
+  { 2,  "`cellModem`",         false, 60000 }, // **Relay 2**
+  { 41, "`pepRouter`",         false, 60000 }, // **Relay 3**
+  { 42, "`dataHub`",           false, 60000 }, // **Relay 4**
+  { 45, "`fleetOne`",          false, 60000 }, // **Relay 5**
+  { 46, "`relay6`",            true,  60000 }  // **Relay 6**
 };
 ```
