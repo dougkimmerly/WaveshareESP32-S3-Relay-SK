@@ -36,13 +36,13 @@ struct RelayInfo {
 
 const String groupName = "reboot2";  // Name of this group of relays - used in the Signal K path
 RelayInfo relays[] = {
-// Pin  Name            NO/NC Reboot time in milliseconds
-  { 1,"starlinkInverter", true, 60000 },   // true = NO, false = NC
-  { 2,"cellModem", false, 60000 },
-  { 41,"pepRouter", false, 60000 },
-  { 42,"dataHub", false, 60000 },
-  { 45,"fleetOne", false, 60000 },
-  { 46,"relay6", true, 60000 }
+// Pin  Name            NO/NC Reboot time in milliseconds  
+  { 1,"starlinkInverter", true, 60000 },   // true = NO, false = NC  
+  { 2,"cellModem", false, 60000 },  
+  { 41,"pepRouter", false, 60000 },  
+  { 42,"dataHub", false, 60000 },  
+  { 45,"fleetOne", false, 60000 },  
+  { 46,"relay6", true, 60000 }  
 };
 
 String getSkPath(const String& relayName) {
