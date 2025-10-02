@@ -41,7 +41,7 @@ const String groupName = "reboot2"; // **Group name used in Signal K path**
 RelayInfo relays[] = {
   // Pin  Name                  NO    Reboot time (ms)  (true=NO false=NC)
   { 1,  "starlinkInverter",  true,  60000 }, // **Relay 1**
-  { 2,  "cellModem",         false, 60000 }, // **Relay 2**
+  { 2,  "cellModem",         false, 5000 }, // **Relay 2**
   { 41, "pepRouter",         false, 60000 }, // **Relay 3**
   { 42, "dataHub",           false, 60000 }, // **Relay 4**
   { 45, "fleetOne",          false, 60000 }, // **Relay 5**
@@ -61,15 +61,17 @@ String getSkOutput(const String& relayName) {
 // along with a SignalK plugin to monitor devices it can set a reboot
 // command that will trigger the reboot sequence
 // Ive also set up a Put listener so any device on the network can trigger a reboot
-// but haven't got it working yet.
-void reboot_sequence(SmartSwitchController* controller, uint32_t on_ms, bool contact_type) {
+// by sending a PUT request with the value "reboot" to the state path of the relay
+////////////////////////////////////////////////////////
+
+void reboot_sequence(SmartSwitchController* controller, 
+          uint32_t on_ms, bool contact_type) {
   if (!contact_type) {
-  controller->emit(true);
-  event_loop()->onDelay(on_ms, [controller] { controller->emit(false); });
-  }
-  else {
-  controller->emit(false);
-  event_loop()->onDelay(on_ms, [controller] { controller->emit(true); });
+    controller->emit(true);
+    event_loop()->onDelay(on_ms, [controller] { controller->emit(false); });
+  } else {
+    controller->emit(false);
+    event_loop()->onDelay(on_ms, [controller] { controller->emit(true); });
   }
 }
 
@@ -97,10 +99,19 @@ SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
   // requests made to the Signal K server to set the switch state.
   // This allows any device on the SignalK network that can make
   // such a request to also control the state of our switch.
-  auto* sk_listener = new StringSKPutRequestListener(sk_path);
-  sk_listener->connect_to(controller->truthy_string_consumer_);
 
-  load_switch->connect_to(new Repeat<bool, bool>(10000))
+  auto* sk_listener = new StringSKPutRequestListener(sk_path);
+  
+  sk_listener->connect_to(new LambdaConsumer<String>(
+      [controller, contact_type, reboot_time_ms, sk_listener](String value) {
+    if (value == "reboot") {  
+        reboot_sequence(controller, reboot_time_ms, contact_type);
+    } else {sk_listener->connect_to(controller->truthy_string_consumer_);
+            }
+    }));
+
+
+  load_switch->connect_to(new Repeat<bool, bool>(600000))
       ->connect_to(new SKOutputBool(sk_path, config_path_sk_output));
 
   // Setup a ValueListener so changing the value with a SK plugin can cause
@@ -124,17 +135,9 @@ SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
     }
     }));
 
-  // Setup a PutRequestListener so that any device on the network
-  // can cause a reboot sequence for manual network control
-  auto* put_reboot_listener = new BoolSKPutRequestListener(reboot_path);
-    put_reboot_listener->connect_to(new LambdaConsumer<bool>(
-      [controller, contact_type, reboot_time_ms](bool value) {
-    if (value) {
-        reboot_sequence(controller, reboot_time_ms, contact_type);
-    }
-    }));
     
-    
+
+  
   return controller;
 }
 
