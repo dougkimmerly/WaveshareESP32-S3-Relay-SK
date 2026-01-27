@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(system_profiler:*)",
+      "Bash(pio device monitor:*)",
+      "Bash(screen:*)",
+      "Bash(timeout 5 cat:*)",
+      "Bash(python3:*)",
+      "Bash(arp:*)",
+      "Bash(ping:*)",
+      "Bash(curl:*)",
+      "Bash(~/.platformio/penv/bin/platformio run:*)",
+      "Bash(timeout 10 cat:*)",
+      "Bash(pio device:*)"
+    ]
+  }
+}

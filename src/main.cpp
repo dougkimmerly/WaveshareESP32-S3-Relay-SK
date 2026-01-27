@@ -13,6 +13,7 @@
 #include "sensesp/transforms/repeat.h"
 #include "sensesp_app_builder.h"
 #include "sensesp/signalk/signalk_value_listener.h"
+#include <WiFi.h>
 
 using namespace sensesp;
 
@@ -53,7 +54,7 @@ String getSkPath(const String& relayName) {
 }
 
 String getSkOutput(const String& relayName) {
-  return "sensesp-" + relayName;
+  return "/sensesp-" + relayName;
 }
 
 ////////////////////////////////////////////////////////
@@ -102,12 +103,13 @@ SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
 
   auto* sk_listener = new StringSKPutRequestListener(sk_path);
   
+  sk_listener->connect_to(controller->truthy_string_consumer_);
+  
   sk_listener->connect_to(new LambdaConsumer<String>(
-      [controller, contact_type, reboot_time_ms, sk_listener](String value) {
+      [controller, contact_type, reboot_time_ms](String value) {
     if (value == "reboot") {  
         reboot_sequence(controller, reboot_time_ms, contact_type);
-    } else {sk_listener->connect_to(controller->truthy_string_consumer_);
-            }
+    }
     }));
 
 
@@ -117,15 +119,15 @@ SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
   // Setup a ValueListener so changing the value with a SK plugin can cause
   // the relay to turn on or off
   String sk_switch_path = "electrical.commands.switch."
-      + config_path_sk_output.substring(8, config_path_sk_output.length());  
+      + config_path_sk_output.substring(9, config_path_sk_output.length());
 
   auto* sk_listener2 = new SKValueListener<String>(sk_switch_path);
-    sk_listener2->connect_to(controller->truthy_string_consumer_);  
+    sk_listener2->connect_to(controller->truthy_string_consumer_);
 
   // Setup a ValueListener so changing the value with a SK plugin can cause
-  // a reboot sequence for in-net automated network monitoring    
-  String reboot_path = "electrical.commands.reboot." 
-      + config_path_sk_output.substring(8, config_path_sk_output.length()); 
+  // a reboot sequence for in-net automated network monitoring
+  String reboot_path = "electrical.commands.reboot."
+      + config_path_sk_output.substring(9, config_path_sk_output.length()); 
 
   auto* reboot_listener = new SKValueListener<bool>(reboot_path);
     reboot_listener->connect_to(new LambdaConsumer<bool>(
@@ -153,9 +155,10 @@ void setup() {
                     ->set_hostname(groupName)
                     // Optionally, hard-code the WiFi and Signal K server
                     // settings. This is normally not needed.
-                    //->set_wifi_client("My WiFi SSID", "my_wifi_password")
+                    // ->set_wifi_client("Manta", "Blacksmith49")
                     //->set_wifi_access_point("My AP SSID", "my_ap_password")
-                    //->set_sk_server("192.168.10.3", 80)
+                    // ->set_sk_server("192.168.22.14", 80)
+                    ->enable_ota("transport")
                     ->get_app();
                     
   // initialize the relays and write up everything to Signal K
@@ -180,17 +183,33 @@ void setup() {
                         getSkPath(relays[4].name),
                         getSkOutput(relays[4].name), 
                         relays[4].NO, relays[4].ms);
-  auto relay_controller6 = initialize_relay(relays[5].pin, 
+  auto relay_controller6 = initialize_relay(relays[5].pin,
                         getSkPath(relays[5].name),
-                        getSkOutput(relays[5].name), 
+                        getSkOutput(relays[5].name),
                         relays[5].NO, relays[5].ms);
-
-
-    while(true)
-    {
-    loop();
-    }
-
 }
 
-void loop() { event_loop()->tick();}
+void loop() {
+  static unsigned long last_debug_print = 0;
+  unsigned long now = millis();
+
+  // Print WiFi debug info every 10 seconds, but only for the first 5 minutes after restart
+  if (now < 300000 && now - last_debug_print > 10000) {
+    last_debug_print = now;
+
+    ESP_LOGI("WIFI_DEBUG", "========== Network Status ==========");
+    ESP_LOGI("WIFI_DEBUG", "WiFi Status: %d", WiFi.status());
+    ESP_LOGI("WIFI_DEBUG", "WiFi Connected: %s", WiFi.status() == WL_CONNECTED ? "YES" : "NO");
+    ESP_LOGI("WIFI_DEBUG", "SSID: %s", WiFi.SSID().c_str());
+    ESP_LOGI("WIFI_DEBUG", "IP Address: %s", WiFi.localIP().toString().c_str());
+    ESP_LOGI("WIFI_DEBUG", "Gateway: %s", WiFi.gatewayIP().toString().c_str());
+    ESP_LOGI("WIFI_DEBUG", "Subnet: %s", WiFi.subnetMask().toString().c_str());
+    ESP_LOGI("WIFI_DEBUG", "DNS: %s", WiFi.dnsIP().toString().c_str());
+    ESP_LOGI("WIFI_DEBUG", "MAC Address: %s", WiFi.macAddress().c_str());
+    ESP_LOGI("WIFI_DEBUG", "RSSI: %d dBm", WiFi.RSSI());
+    ESP_LOGI("WIFI_DEBUG", "Hostname: %s", WiFi.getHostname());
+    ESP_LOGI("WIFI_DEBUG", "====================================");
+  }
+
+  event_loop()->tick();
+}
