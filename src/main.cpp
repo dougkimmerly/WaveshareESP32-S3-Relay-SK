@@ -44,11 +44,11 @@ const String groupName = "reboot2"; // **Group name used in Signal K path**
 
 RelayInfo relays[] = {
   // Pin  Name                  NO    Reboot time (ms)  (true=NO false=NC)
-  { 1,  "starlinkInverter",  false,  60000 }, // **Relay 1**
-  { 2,  "cellModem",         false, 60000 }, // **Relay 2**
-  { 41, "pepRouter",         false, 60000 }, // **Relay 3**
+  { 1,  "starlinkInverter",  false,  60000 }, // **Relay 1** — Starlink Maritime (NC, default ON)
+  { 2,  "cellModem",         false, 60000 }, // **Relay 2** — HD1 Dome cell modem (rewired 2026-05-25 from old Nighthawk; NC, default ON)
+  { 41, "pepRouter",         false, 60000 }, // **Relay 3** — NarwhalCore router (NC, default ON, has 24h watchdog)
   { 42, "dataHub",           false, 60000 }, // **Relay 4**
-  { 45, "fleetOne",          false, 60000 }, // **Relay 5**
+  { 45, "fleetOne",          true,  60000 }, // **Relay 5** — FleetOne satellite (NO, default OFF — energize to power on; wired 2026-05-25)
   { 46, "relay6",            true,  60000 }  // **Relay 6**
 };
 
