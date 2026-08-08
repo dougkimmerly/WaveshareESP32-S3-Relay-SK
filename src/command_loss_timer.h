@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "auth_token.h"
+#include "bench_time_scale.h"
 #include "wall_clock.h"
 
 // Command-loss timer (CLT): the layer that assumes all software above it is
@@ -40,12 +41,19 @@ enum class Action {
 };
 
 struct Thresholds {
-  uint64_t rung_12h_secs = 12 * 3600;
-  uint64_t rung_24h_secs = 24 * 3600;
-  uint64_t rung_48h_secs = 48 * 3600;
-  uint64_t window_open_utc_secs = 16 * 3600;   // 16:00 UTC
-  uint64_t window_close_utc_secs = 18 * 3600;  // 18:00 UTC
-  uint64_t auth_window_secs = 600;             // +-10 min replay window
+  uint64_t rung_12h_secs = 12 * 3600 / bench::kTimeScale;
+  uint64_t rung_24h_secs = 24 * 3600 / bench::kTimeScale;
+  uint64_t rung_48h_secs = 48 * 3600 / bench::kTimeScale;
+
+  // Length of the "day" the window schedule below cycles over. Real time:
+  // an actual UTC day (86400s). Bench builds compress it by the same
+  // BENCH_TIME_SCALE divisor so the daily windows actually open/close
+  // inside a short soak instead of once every 24 real hours — see
+  // bench_time_scale.h.
+  uint64_t day_secs = 86400 / bench::kTimeScale;
+  uint64_t window_open_utc_secs = 16 * 3600 / bench::kTimeScale;   // 16:00 UTC
+  uint64_t window_close_utc_secs = 18 * 3600 / bench::kTimeScale;  // 18:00 UTC
+  uint64_t auth_window_secs = 600;  // +-10 min replay window; NOT scaled — see bench_time_scale.h
 
   // FleetOne window (fixer ADR 0055 §6-7): relay 5, NO contact, default
   // de-energized. Independent of the terminal WAN-chain window above —
@@ -53,8 +61,8 @@ struct Thresholds {
   // started, keeps firing daily forever, including all through terminal
   // posture. A suspended satellite service just makes the window's
   // connection attempt fail; that's harmless by design.
-  uint64_t fleetone_window_open_utc_secs = 16 * 3600;         // 16:00 UTC
-  uint64_t fleetone_window_close_utc_secs = 16 * 3600 + 1800;  // 16:30 UTC
+  uint64_t fleetone_window_open_utc_secs = 16 * 3600 / bench::kTimeScale;          // 16:00 UTC
+  uint64_t fleetone_window_close_utc_secs = (16 * 3600 + 1800) / bench::kTimeScale;  // 16:30 UTC
 };
 
 inline const std::string& contact_token_context() {
@@ -144,7 +152,7 @@ class CommandLossTimer {
 
     if (rung_ == Rung::kTerminal && wall_clock_.has_estimate()) {
       uint64_t now_unix = wall_clock_.estimate(now_mono);
-      uint64_t sec_of_day = now_unix % 86400;
+      uint64_t sec_of_day = now_unix % th_.day_secs;
       bool in_window =
           sec_of_day >= th_.window_open_utc_secs && sec_of_day < th_.window_close_utc_secs;
       if (in_window && !terminal_window_open_) {
@@ -167,7 +175,7 @@ class CommandLossTimer {
     bool fleetone_active = (rung_ == Rung::kRung24h || rung_ == Rung::kTerminal);
     if (fleetone_active && wall_clock_.has_estimate()) {
       uint64_t now_unix = wall_clock_.estimate(now_mono);
-      uint64_t sec_of_day = now_unix % 86400;
+      uint64_t sec_of_day = now_unix % th_.day_secs;
       bool in_window = sec_of_day >= th_.fleetone_window_open_utc_secs &&
                         sec_of_day < th_.fleetone_window_close_utc_secs;
       if (in_window && !fleetone_window_open_) {

@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "auth_token.h"
+#include "bench_time_scale.h"
 
 // Commit-confirm guard (fixer ADR 0055 §4): any command that would cut power
 // to a WAN-chain relay (1-4) applies provisionally and is automatically
@@ -41,7 +42,12 @@ inline std::string confirm_token_context(int relay_id) {
 
 class CommitConfirmGuard {
  public:
-  explicit CommitConfirmGuard(std::string secret, uint64_t confirm_window_secs = 15 * 60,
+  // confirm_window_secs default is scaled by BENCH_TIME_SCALE (see
+  // bench_time_scale.h); auth_window_secs is NOT — a confirm token's
+  // freshness is checked against the real wall clock at the moment it's
+  // presented, same reasoning as CommandLossTimer::Thresholds::auth_window_secs.
+  explicit CommitConfirmGuard(std::string secret,
+                               uint64_t confirm_window_secs = (15 * 60) / bench::kTimeScale,
                                uint64_t auth_window_secs = 600)
       : secret_(std::move(secret)),
         window_secs_(confirm_window_secs),

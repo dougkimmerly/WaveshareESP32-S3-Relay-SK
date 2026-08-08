@@ -3,6 +3,56 @@
 Cross-domain and unattended-job discoveries that need a human decision or a
 follow-up job, kept here so they don't evaporate. Newest first.
 
+## 2026-08-08 — accelerated-time flag + bench-checklist.md written (job 6/6, final)
+
+**Source:** cross-domain request from fixer CC, job 6 (final job in the
+fixer ADR 0055 §4 series). The accelerated-time design decision the job 5
+entry below flagged as needing Doug was made by the fixer reviewer
+(2026-08-08): a compile-time `BENCH_TIME_SCALE` build flag, integer divisor,
+default 1.
+
+**What shipped:** `src/bench_time_scale.h` — `BENCH_TIME_SCALE` (default 1,
+absent from production builds), applied to `command_loss_timer.h`'s
+`Thresholds` (rung durations, terminal/FleetOne window open/close offsets,
+and the `day_secs` modulus the window schedules cycle over — not just the
+offsets, so a bench "day" actually compresses) and `commit_confirm.h`'s
+default `confirm_window_secs`. Deliberately NOT applied to either module's
+`auth_window_secs` (token freshness/replay) — those check against the real
+wall clock at token-presentation time, so scaling them would desync rather
+than accelerate. `src/main.cpp` makes a scaled build unmistakable: boot-time
+`ESP_LOGE`, `electrical.reboot2.semantics` becomes
+`"v2-powered bench-scale-<n>"`, and a new `electrical.reboot2.benchTimeScale`
+SK path always publishes the value. `platformio.ini` gained
+`env:bench_pioarduino_esp32s3` (`-D BENCH_TIME_SCALE=720`, 12h→60s) as a
+separate, explicitly-named env from the real `env:pioarduino_esp32s3`.
+
+`docs/bench-checklist.md` written per the original (job 4) ask, now
+truthful against the actually-wired firmware: bench build config (scale
+flag, bench HMAC secret, USB-not-OTA flash), per-relay dummy-load table
+reusing job 1's semantics table, boot fail-safe checked first *and* last,
+every CLT rung walked at scale including authenticated-token reset from
+each rung (incl. terminal), commit-confirm revert + confirm, FleetOne/
+terminal window open/close, NTP-lost drift-fallback spot check,
+disarmed-mode behavior, pass criteria, and the artifacts list (production
+build hash, signed-off checklist, observed semantics marker string, SOPS
+secret provisioning steps).
+
+**Validation:** all host tests green, including new
+`test/test_bench_time_scale.cpp` run twice (default scale=1, and
+`-D BENCH_TIME_SCALE=720`) — proves the divisor actually reaches every
+scaled constant and leaves the auth windows alone. `pio run -e
+pioarduino_esp32s3` (production, no flag) and `pio run -e
+bench_pioarduino_esp32s3` (scale=720) both green.
+
+**Not validated:** the checklist itself has not been run against real
+hardware — no spare ESP32-S3-Relay-6CH in this job's environment, same
+constraint as every prior job in this series. It's written to be runnable
+by someone who didn't write the firmware, but only an actual bench soak
+proves that true.
+
+**This closes the ADR 0055 §4 job series (jobs 1-6).** No further follow-up
+job identified from this series; any future gap is a fresh ask.
+
 ## 2026-08-08 — CLT/commit-confirm wired live (job 5/4); bench checklist is now unblocked
 
 **Source:** cross-domain request from fixer CC, job 5 (fixer ADR 0055 §4

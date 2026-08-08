@@ -121,6 +121,8 @@ PUT paths (armed only):
   captured token from one can't be replayed against another.
 - `src/wall_clock.h` — NTP-anchored wall clock with a monotonic-drift
   fallback (see "Time base" below).
+- `src/bench_time_scale.h` — the `BENCH_TIME_SCALE` accelerated-time build
+  flag (see below).
 - `src/command_loss_timer.h` — the CLT state machine (rungs + terminal
   posture window).
 - `src/commit_confirm.h` — the provisional-apply / auto-revert guard for
@@ -268,6 +270,37 @@ The shared HMAC secret is never committed. At bench/deploy time:
    disarmed" above. `pio run -e pioarduino_esp32s3` is green both with and
    without `secrets.local.ini` present (verified as part of that job).
 
+## Accelerated time (`BENCH_TIME_SCALE`, job 6/6)
+
+`src/bench_time_scale.h` defines a compile-time integer divisor,
+`BENCH_TIME_SCALE` (default 1 = real time, absent from production builds),
+applied to:
+
+- `Thresholds::rung_12h_secs` / `rung_24h_secs` / `rung_48h_secs`
+- `CommitConfirmGuard`'s default `confirm_window_secs` (15 min)
+- `Thresholds::window_open_utc_secs` / `window_close_utc_secs` (terminal)
+  and `fleetone_window_open_utc_secs` / `fleetone_window_close_utc_secs`
+- `Thresholds::day_secs` — the modulus the two window schedules above cycle
+  over (86400 in real time), so a bench build's "day" is actually
+  compressed rather than just moving the open/close offsets inside an
+  unchanged 24h cycle
+
+It deliberately does **not** touch `auth_window_secs` (CLT contact token
+freshness) or `CommitConfirmGuard`'s own `auth_window_secs` (confirm token
+freshness) — those are checked against the real wall clock at the moment a
+token is presented, not against elapsed CLT time, so scaling them would
+desync the check from reality rather than accelerate anything.
+
+A bench build sets it via `-D BENCH_TIME_SCALE=<n>` — see
+`platformio.ini`'s `env:bench_pioarduino_esp32s3` (720 = 12h → 60s) — and is
+loudly self-identifying: the boot log prints an `ESP_LOGE` warning, the
+`electrical.reboot2.semantics` marker string becomes
+`"v2-powered bench-scale-<n>"` instead of plain `"v2-powered"`, and a
+dedicated `electrical.reboot2.benchTimeScale` (int) SK path publishes `<n>`
+(always `1` on a production build). **A scaled build must never be flashed
+to the boat** — see `docs/bench-checklist.md` for the full attended bench
+procedure this flag exists for.
+
 ## Host tests
 
 Same pattern as `test/test_contact_mapping.cpp` — plain g++, no
@@ -277,4 +310,6 @@ PlatformIO/Arduino toolchain required:
 for t in hmac_sha256 auth_token command_loss_timer commit_confirm; do
   g++ -std=c++17 -Isrc "test/test_${t}.cpp" -o "/tmp/test_${t}" && "/tmp/test_${t}"
 done
+# BENCH_TIME_SCALE needs a second run with the flag defined:
+g++ -std=c++17 -Isrc -D BENCH_TIME_SCALE=720 test/test_bench_time_scale.cpp -o /tmp/t && /tmp/t
 ```

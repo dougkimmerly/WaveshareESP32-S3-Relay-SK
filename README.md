@@ -90,7 +90,19 @@ toolchain:
 for t in contact_mapping hmac_sha256 auth_token command_loss_timer commit_confirm internet_probe; do
   g++ -std=c++17 -Isrc "test/test_${t}.cpp" -o "/tmp/test_${t}" && "/tmp/test_${t}"
 done
+# BENCH_TIME_SCALE (see below) needs a second run with the flag defined:
+g++ -std=c++17 -Isrc -D BENCH_TIME_SCALE=720 test/test_bench_time_scale.cpp -o /tmp/test_bts && /tmp/test_bts
 ```
+
+**Accelerated-time bench builds (fixer ADR 0055 §4, job 6/6):**
+`src/bench_time_scale.h`'s `BENCH_TIME_SCALE` compile-time flag divides CLT
+rung durations, the commit-confirm window, and the FleetOne/terminal window
+schedule by an integer factor for a bench soak that runs in minutes instead
+of days — see `docs/bench-checklist.md` for the full attended procedure and
+`platformio.ini`'s `env:bench_pioarduino_esp32s3`. **A `BENCH_TIME_SCALE`
+build must NEVER be flashed to the boat** — it is loudly self-identifying
+(boot log + `electrical.reboot2.semantics` / `.benchTimeScale` on SignalK)
+specifically so this mistake is easy to catch before it happens.
 
 **Command-loss timer / commit-confirm (fixer ADR 0055 §4, job 5/4):** wired
 live into `src/main.cpp`'s relay control flow as of this job, gated on

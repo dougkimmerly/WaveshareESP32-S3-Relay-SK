@@ -32,6 +32,7 @@
 // REBOOT2_HMAC_SECRET was supplied at build time — see the "CLT / commit-
 // confirm runtime" section and docs/command-loss-timer.md.
 #include "auth_token.h"
+#include "bench_time_scale.h"
 #include "command_loss_timer.h"
 #include "commit_confirm.h"
 #include "internet_probe.h"
@@ -745,9 +746,33 @@ void setup() {
   // the powerNet PNP reconciler) gates actuation on this exact string to
   // avoid double-inverting NC relay commands. Emitted once at startup and
   // every 60s thereafter so it's picked up on (re)connect.
-  auto* semantics_marker = new StringConstantSensor(String("v2-powered"), 60);
+  //
+  // BENCH_TIME_SCALE (fixer ADR 0055 §4, job 6/6): when a bench build's
+  // scale differs from 1, it's appended here so the marker string itself is
+  // unmistakably different from a production build — see
+  // bench_time_scale.h and docs/bench-checklist.md. A scaled build must
+  // NEVER be flashed to the boat.
+#if BENCH_TIME_SCALE != 1
+  String semantics_value = String("v2-powered bench-scale-") + String(BENCH_TIME_SCALE);
+#else
+  String semantics_value = String("v2-powered");
+#endif
+  auto* semantics_marker = new StringConstantSensor(semantics_value, 60);
   semantics_marker->connect_to(
       new SKOutputString("electrical." + groupName + ".semantics"));
+
+  // Numeric companion to the marker above, always published (1 in
+  // production) — see "Bench-scale visibility" in docs/bench-checklist.md.
+  auto* bench_time_scale_sensor =
+      new IntConstantSensor(static_cast<int>(BENCH_TIME_SCALE), 60);
+  bench_time_scale_sensor->connect_to(
+      new SKOutputInt("electrical." + groupName + ".benchTimeScale"));
+
+#if BENCH_TIME_SCALE != 1
+  ESP_LOGE("BENCH", "*** BENCH_TIME_SCALE=%d — this is an ACCELERATED-TIME "
+                     "BENCH BUILD. DO NOT FLASH TO THE BOAT. ***",
+           BENCH_TIME_SCALE);
+#endif
 
   // CLT / commit-confirm runtime (fixer ADR 0055 §4, job 5/4 follow-up).
   // g_sk_clt_armed is published either way — see the "CLT / Commit-Confirm
