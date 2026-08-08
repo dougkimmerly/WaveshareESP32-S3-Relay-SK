@@ -77,15 +77,22 @@ RelayInfo relays[] = {
 
 ---
 
-**Testing:** The NC/NO wire-semantics mapping (`src/contact_mapping.h`) and the
+**Testing:** The NC/NO wire-semantics mapping (`src/contact_mapping.h`), the
 command-loss-timer / commit-confirm layer (`src/command_loss_timer.h`,
 `src/commit_confirm.h`, `src/auth_token.h`, `src/hmac_sha256.h`,
-`src/wall_clock.h` — see `docs/command-loss-timer.md`) are pure logic with no
-Arduino dependency, so they have plain g++ host tests instead of requiring
-hardware or the PlatformIO toolchain:
+`src/wall_clock.h` — see `docs/command-loss-timer.md`), and the internet-probe
+consensus / hold-off logic (`src/internet_probe.h` — see
+`docs/observability.md`) are pure logic with no Arduino dependency, so they
+have plain g++ host tests instead of requiring hardware or the PlatformIO
+toolchain:
 
 ```sh
-for t in contact_mapping hmac_sha256 command_loss_timer commit_confirm; do
+for t in contact_mapping hmac_sha256 command_loss_timer commit_confirm internet_probe; do
   g++ -std=c++17 -Isrc "test/test_${t}.cpp" -o "/tmp/test_${t}" && "/tmp/test_${t}"
 done
 ```
+
+**Watchdog observability:** the router watchdog's fail counters, circuit-
+breaker state, and the internet-reachability probe (fixer ADR 0055 §4, job
+3/4) are published to SignalK under `electrical.reboot2.watchdog.*` — see
+`docs/observability.md` for the full path list and what each means.

@@ -33,6 +33,19 @@
 #include "auth_token.h"
 #include "command_loss_timer.h"
 #include "commit_confirm.h"
+#include "internet_probe.h"
+
+// OTA password (fixer ADR 0055 §4, job 3/4): build-time secret, same
+// untracked-local-file + SOPS-sourced pattern as REBOOT2_HMAC_SECRET (see
+// secrets.local.ini.example, docs/command-loss-timer.md). Falls back to the
+// prior hardcoded value only so a clean checkout with no secrets.local.ini
+// still builds — see docs/observability.md "OTA password rotation" for the
+// bench-flash rotation step. `pio run` warns loudly when the fallback is in
+// use so it can't silently ship in a real build.
+#ifndef REBOOT2_OTA_PASSWORD
+#define REBOOT2_OTA_PASSWORD "transport"
+#warning "REBOOT2_OTA_PASSWORD not set — using insecure default OTA password. See secrets.local.ini.example."
+#endif
 
 using namespace sensesp;
 
@@ -211,19 +224,33 @@ SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
 //   Failure is accumulated in NVS flash — survives ESP.restart().
 //   At 23h: ESP.restart() (rules out ESP WiFi stack as the problem).
 //   At 24h: trigger pepRouter relay reboot sequence (60s power cut).
-//   Post-reboot: 10-min hold-off before resuming monitoring.
+//   Post-reboot: hold-off before resuming monitoring, growing exponentially
+//   per prior action (src/internet_probe.h ExponentialHoldoff) — strictly
+//   more patient than the old fixed 10-min hold-off, never less.
 //   Circuit breaker: max 3 router reboots. Reset after 7 days of clean pings.
 //
 // NVS namespace "watchdog" is cleared on ESP_RST_POWERON and preserved across
 // ESP.restart() so the 23h/24h counters survive the Stage 1 soft restart.
+//
+// This LAN-only probe cannot see a WAN-only outage (router answers fine on
+// the LAN, but its internet uplink is down) — see the Internet Probe section
+// below (fixer ADR 0055 §4, job 3/4, investigation §1.2) for that input.
+// It is observability-only for now: which relay(s) to act on for a
+// WAN-only outage is a judgment call (Starlink vs. cell modem vs. router)
+// that belongs to Doug, not a guess baked into an unattended job — see
+// docs/observability.md.
 
 static const IPAddress WATCHDOG_TARGET(192, 168, 22, 1);
 static const uint16_t  WATCHDOG_PORT            = 80;
 static const uint32_t  FAIL_ESP_RESTART_SECS    = 23 * 3600;    // restart ESP at 23h
 static const uint32_t  FAIL_ROUTER_REBOOT_SECS  = 24 * 3600;    // reboot router at 24h
-static const uint32_t  HOLDOFF_SECS             = 600;           // 10-min post-reboot hold-off
+static const uint32_t  HOLDOFF_BASE_SECS        = 600;           // 1st post-reboot hold-off
+static const uint32_t  HOLDOFF_MAX_SECS         = 4 * 3600;      // hold-off cap
 static const uint32_t  CLEAN_RESET_SECS         = 7 * 24 * 3600; // 7 days clean → reset counter
 static const uint8_t   MAX_ROUTER_REBOOTS       = 3;
+
+static reboot2::netprobe::ExponentialHoldoff g_router_holdoff(HOLDOFF_BASE_SECS, HOLDOFF_MAX_SECS,
+                                                               MAX_ROUTER_REBOOTS);
 
 static bool router_alive() {
   if (WiFi.status() != WL_CONNECTED) return false;
@@ -233,22 +260,78 @@ static bool router_alive() {
   return ok;
 }
 
+// ─── Internet Probe ────────────────────────────────────────────────────────
+//
+// Second watchdog input (fixer ADR 0055 §4, job 3/4, investigation §1.2):
+// TCP connect to two independent, well-known anycast targets on 443 every
+// 60s. Internet is declared "down" only on consensus of both (src/
+// internet_probe.h ConsensusResult::internet_down()) so one target's
+// regional/rate-limit hiccup can't false-positive. INTERNET_CONFIRM_TICKS
+// consecutive down ticks (ConfirmGate) are required before the
+// confirmed-outage state is published — debounces a single bad tick. This
+// is observability-only: it publishes state to SignalK, it does not
+// trigger any relay action (see note above).
+
+static const IPAddress INTERNET_PROBE_A(1, 1, 1, 1);   // Cloudflare
+static const IPAddress INTERNET_PROBE_B(8, 8, 8, 8);   // Google
+static const uint16_t  INTERNET_PROBE_PORT       = 443;
+static const uint8_t   INTERNET_CONFIRM_TICKS    = 5;   // 5 consecutive 60s ticks = 5 min
+
+static reboot2::netprobe::ConfirmGate g_internet_confirm(INTERNET_CONFIRM_TICKS);
+
+static bool internet_probe(const IPAddress& target) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  WiFiClient client;
+  bool ok = client.connect(target, INTERNET_PROBE_PORT, 1500);
+  client.stop();
+  return ok;
+}
+
+// ─── Watchdog Observability (SignalK) ──────────────────────────────────────
+//
+// Publishes the watchdog's internal state — previously not remotely
+// observable at all (investigation §1.2) — so the home dead-man and
+// post-incident forensics can see it without a bench connection. Created
+// once in setup(); the tick functions below call ->set() on these each
+// pass. See README.md for the full path list.
+
+static SKOutputBool* g_sk_internet_reachable        = nullptr;
+static SKOutputBool* g_sk_internet_outage_confirmed = nullptr;
+static SKOutputInt*  g_sk_watchdog_fail_seconds     = nullptr;
+static SKOutputBool* g_sk_watchdog_breaker_open     = nullptr;
+static SKOutputInt*  g_sk_watchdog_reboot_count     = nullptr;
+static SKOutputBool* g_sk_watchdog_holdoff_active   = nullptr;
+
+static void publish_watchdog_state(uint32_t fail_s, uint8_t reboots, bool holdoff_active) {
+  if (g_sk_watchdog_fail_seconds) g_sk_watchdog_fail_seconds->set(static_cast<int>(fail_s));
+  if (g_sk_watchdog_reboot_count) g_sk_watchdog_reboot_count->set(static_cast<int>(reboots));
+  if (g_sk_watchdog_breaker_open) g_sk_watchdog_breaker_open->set(reboots >= MAX_ROUTER_REBOOTS);
+  if (g_sk_watchdog_holdoff_active) g_sk_watchdog_holdoff_active->set(holdoff_active);
+}
+
 static void watchdog_tick(SmartSwitchController* router_ctrl) {
   Preferences p;
   p.begin("watchdog", false);
 
-  // Post-reboot hold-off: give NarwhalCore time to fully boot before resuming
+  // Post-reboot hold-off: give NarwhalCore time to fully boot before
+  // resuming. Target grows exponentially per prior action taken (`reboots`
+  // already reflects the action that just triggered this hold-off — see
+  // ExponentialHoldoff::holdoff_secs()) so repeated flapping backs off
+  // instead of retrying at the same fixed 10-min cadence forever.
   if (p.getBool("holdoff", false)) {
+    uint8_t  reboots_so_far = p.getUChar("reboots", 0);
+    uint32_t target = g_router_holdoff.holdoff_secs(reboots_so_far > 0 ? reboots_so_far - 1 : 0);
     uint32_t h = p.getUInt("holdoff_s", 0) + 60;
-    if (h >= HOLDOFF_SECS) {
+    if (h >= target) {
       p.putBool("holdoff", false);
       p.putUInt("holdoff_s", 0);
       p.putUInt("fail_s", 0);
       ESP_LOGI("WD", "Hold-off complete — monitoring resumed");
     } else {
       p.putUInt("holdoff_s", h);
-      ESP_LOGI("WD", "Post-reboot hold-off: %u/%u s", h, HOLDOFF_SECS);
+      ESP_LOGI("WD", "Post-reboot hold-off: %u/%u s", h, target);
     }
+    publish_watchdog_state(p.getUInt("fail_s", 0), reboots_so_far, h < target);
     p.end();
     return;
   }
@@ -273,6 +356,7 @@ static void watchdog_tick(SmartSwitchController* router_ctrl) {
       p.putUInt("clean_s", 0);
       ESP_LOGI("WD", "7 days clean — router reboot counter reset");
     }
+    publish_watchdog_state(0, p.getUChar("reboots", 0), false);
     p.end();
     return;
   }
@@ -292,6 +376,7 @@ static void watchdog_tick(SmartSwitchController* router_ctrl) {
   if (reboots >= MAX_ROUTER_REBOOTS) {
     ESP_LOGE("WD", "Circuit breaker open — %u reboots attempted, manual intervention required",
              reboots);
+    publish_watchdog_state(fail_s, reboots, false);
     p.end();
     return;
   }
@@ -314,12 +399,36 @@ static void watchdog_tick(SmartSwitchController* router_ctrl) {
     p.putBool("holdoff", true);
     p.putUInt("holdoff_s", 0);
     p.putBool("esp_rst", false);
+    publish_watchdog_state(fail_s, reboots + 1, true);
     p.end();
     reboot_sequence(router_ctrl, 60000);  // uniform load semantics: cut power 60s then restore
     return;
   }
 
+  publish_watchdog_state(fail_s, reboots, false);
   p.end();
+}
+
+// Runs every 60s alongside watchdog_tick(). Feeds the two-target consensus
+// probe through ConfirmGate before publishing "confirmed outage" so a
+// single bad tick doesn't flip that state. Observability-only — see the
+// note at the top of the Router Watchdog section for why this does not (yet)
+// trigger any relay action.
+static void internet_probe_tick() {
+  reboot2::netprobe::ConsensusResult result = reboot2::netprobe::check_consensus(
+      [] { return internet_probe(INTERNET_PROBE_A); },
+      [] { return internet_probe(INTERNET_PROBE_B); });
+
+  bool confirmed_down = g_internet_confirm.tick(result.internet_down());
+
+  if (g_sk_internet_reachable) g_sk_internet_reachable->set(!result.internet_down());
+  if (g_sk_internet_outage_confirmed) g_sk_internet_outage_confirmed->set(confirmed_down);
+
+  if (confirmed_down && g_internet_confirm.consecutive_count() == INTERNET_CONFIRM_TICKS) {
+    ESP_LOGW("WD", "Internet outage confirmed after %u consecutive failed ticks (WAN-only — "
+                    "router LAN may still be up)",
+             INTERNET_CONFIRM_TICKS);
+  }
 }
 
 
@@ -346,8 +455,25 @@ void setup() {
                     // ->set_wifi_client("Manta", "Blacksmith49")
                     //->set_wifi_access_point("My AP SSID", "my_ap_password")
                     // ->set_sk_server("192.168.22.14", 80)
-                    ->enable_ota("transport")
+                    ->enable_ota(REBOOT2_OTA_PASSWORD)
                     ->get_app();
+
+  // Watchdog + internet-probe observability outputs (fixer ADR 0055 §4,
+  // job 3/4) — created once here, ->set() from watchdog_tick() /
+  // internet_probe_tick() below. See README.md for the path list.
+  g_sk_internet_reachable = new SKOutputBool(
+      "electrical." + groupName + ".watchdog.internetReachable", "/sensesp-watchdogInternetReachable");
+  g_sk_internet_outage_confirmed = new SKOutputBool(
+      "electrical." + groupName + ".watchdog.internetOutageConfirmed",
+      "/sensesp-watchdogInternetOutageConfirmed");
+  g_sk_watchdog_fail_seconds = new SKOutputInt(
+      "electrical." + groupName + ".watchdog.failSeconds", "/sensesp-watchdogFailSeconds");
+  g_sk_watchdog_breaker_open = new SKOutputBool(
+      "electrical." + groupName + ".watchdog.breakerOpen", "/sensesp-watchdogBreakerOpen");
+  g_sk_watchdog_reboot_count = new SKOutputInt(
+      "electrical." + groupName + ".watchdog.rebootCount", "/sensesp-watchdogRebootCount");
+  g_sk_watchdog_holdoff_active = new SKOutputBool(
+      "electrical." + groupName + ".watchdog.holdoffActive", "/sensesp-watchdogHoldoffActive");
 
   // initialize the relays and write up everything to Signal K
 
@@ -380,6 +506,10 @@ void setup() {
   event_loop()->onRepeat(60000, [relay_controller3]() {
     watchdog_tick(relay_controller3);
   });
+
+  // Register internet-reachability probe — checks every 60s, observability
+  // only (fixer ADR 0055 §4, job 3/4; see the Internet Probe section above).
+  event_loop()->onRepeat(60000, []() { internet_probe_tick(); });
 
   // Semantics marker (fixer #1224 / ADR 0055 §4): app-side code (cruising-app,
   // the powerNet PNP reconciler) gates actuation on this exact string to
