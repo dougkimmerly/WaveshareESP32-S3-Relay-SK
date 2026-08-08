@@ -1,5 +1,44 @@
 # SensESP Remote Switching Controller
 
+> **⚠️ BREAKING CHANGE — v2-powered semantics (fixer #1224, ADR 0055 §4)**
+>
+> As of this version, the SignalK wire value for **every** relay's `.state`
+> path (and the `electrical.commands.switch.*` / `electrical.commands.reboot.*`
+> command paths) means **"is the device POWERED"** — `true` = powered,
+> `false` = unpowered — for both NC and NO relays. Previously the wire value
+> was the raw coil energize state, which meant `true` actually meant
+> "powered OFF" for the four NC relays (starlinkInverter, cellModem,
+> pepRouter, dataHub). Any app-side code that used to invert NC values to
+> compensate must have that inversion **removed** (cruising-app `f4377e7`).
+> This firmware publishes `electrical.reboot2.semantics = "v2-powered"`
+> (on connect and every 60s) so app code can detect the new firmware and
+> gate actuation on it — check for that exact string before assuming
+> uninverted semantics, to avoid double-inverting during a mixed-version
+> window.
+>
+> **The firmware and app-side changes deploy in the SAME attended window.**
+> Flashing this firmware is attended-only (see repo guardrails below) —
+> do not flash without also deploying the corresponding cruising-app change.
+>
+> The physical boot/reset/brownout behavior is UNCHANGED: all coils are
+> still driven LOW at reset before any SensESP code runs, which still means
+> all 4 NC loads are powered and both NO loads are unpowered, independent of
+> firmware/WiFi/SignalK state. Only the SignalK-facing meaning of the wire
+> value changed.
+>
+> | Relay | Name | Contact | Wire value `true` → physical effect | Boot state (coil LOW) |
+> |---|---|---|---|---|
+> | 1 | starlinkInverter | NC | device powered (coil de-energized) | powered |
+> | 2 | cellModem | NC | device powered (coil de-energized) | powered |
+> | 3 | pepRouter | NC | device powered (coil de-energized) | powered |
+> | 4 | dataHub | NC | device powered (coil de-energized) | powered |
+> | 5 | fleetOne | NO | device powered (coil energized) | unpowered |
+> | 6 | relay6 (spare) | NO | device powered (coil energized) | unpowered |
+>
+> A `reboot` command (or `electrical.commands.reboot.*` = true) always means
+> "cut power, wait `ms`, restore power" for every relay, regardless of
+> contact type.
+
 This repository is specific to the WaveShare 6 relay module.
 https://www.waveshare.com/wiki/ESP32-S3-Relay-6CH easily available at Amazon. It can likely be adapted to other devices.
 
@@ -34,4 +73,14 @@ RelayInfo relays[] = {
   { 45, "`fleetOne`",          true,  60000 }, // **Relay 5** — FleetOne sat (NO, default OFF)
   { 46, "`relay6`",            true,  60000 }  // **Relay 6**
 };
+```
+
+---
+
+**Testing:** The NC/NO wire-semantics mapping (`src/contact_mapping.h`) is pure
+logic with no Arduino dependency, so it has a plain g++ host test instead of
+requiring hardware or the PlatformIO toolchain:
+
+```sh
+g++ -std=c++17 -Isrc test/test_contact_mapping.cpp -o /tmp/test_contact_mapping && /tmp/test_contact_mapping
 ```

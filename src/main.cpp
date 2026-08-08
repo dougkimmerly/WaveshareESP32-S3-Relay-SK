@@ -4,6 +4,7 @@
 #include "sensesp.h"
 #include "sensesp/controllers/smart_switch_controller.h"
 #include "sensesp/sensors/analog_input.h"
+#include "sensesp/sensors/constant_sensor.h"
 #include "sensesp/sensors/digital_input.h"
 #include "sensesp/sensors/digital_output.h"
 #include "sensesp/sensors/sensor.h"
@@ -11,6 +12,7 @@
 #include "sensesp/signalk/signalk_put_request_listener.h"
 #include "sensesp/system/lambda_consumer.h"
 #include "sensesp/transforms/repeat.h"
+#include "sensesp/transforms/transform.h"
 #include "sensesp_app_builder.h"
 #include "sensesp/signalk/signalk_value_listener.h"
 #include <WiFi.h>
@@ -18,7 +20,25 @@
 #include <Preferences.h>
 #include "esp_system.h"
 
+#include "contact_mapping.h"
+
 using namespace sensesp;
+
+// Wraps the pure map_load_coil() logic (contact_mapping.h) as a SensESP
+// transform. The same class is used both directions in the signal chain:
+// load->coil (driving the physical relay) and coil->load (reporting SK
+// state), since the mapping is its own inverse.
+class ContactMapTransform : public BooleanTransform {
+ public:
+  explicit ContactMapTransform(bool is_no) : BooleanTransform(""), is_no_{is_no} {}
+
+  void set(const bool& input) override {
+    this->emit(map_load_coil(input, is_no_));
+  }
+
+ private:
+  bool is_no_;
+};
 
 
 
@@ -68,15 +88,13 @@ String getSkOutput(const String& relayName) {
 // by sending a PUT request with the value "reboot" to the state path of the relay
 ////////////////////////////////////////////////////////
 
-void reboot_sequence(SmartSwitchController* controller,
-          uint32_t on_ms, bool contact_type) {
-  if (!contact_type) {
-    controller->emit(true);
-    event_loop()->onDelay(on_ms, [controller] { controller->emit(false); });
-  } else {
-    controller->emit(false);
-    event_loop()->onDelay(on_ms, [controller] { controller->emit(true); });
-  }
+// Uniform load semantics (v2-powered): the controller always operates in
+// terms of "is the device powered", regardless of NC/NO contact type — the
+// ContactMapTransform on its output handles the physical inversion. A
+// reboot is always: cut power, wait, restore power.
+void reboot_sequence(SmartSwitchController* controller, uint32_t on_ms) {
+  controller->emit(false);
+  event_loop()->onDelay(on_ms, [controller] { controller->emit(true); });
 }
 
 SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
@@ -86,14 +104,25 @@ SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
                               ) {
   // Initialize the relay pin to output
   pinMode(pin, OUTPUT);
-  // Set the relay GPIO pins to LOW (off) initially
+  // Set the relay GPIO pins to LOW (off) initially. This is the SACRED boot
+  // fail-safe: at reset/brownout every coil is LOW, which de-energizes all
+  // 6 relays. For the 4 NC relays that means the load is POWERED with no
+  // firmware involvement; for the 2 NO relays it means unpowered. Nothing
+  // downstream of this line may change that physical reset behavior.
   digitalWrite(pin, LOW);
   auto* load_switch = new DigitalOutput(pin);
 
-  // Create a switch controller to handle the user press logic and
-  // connect it to the load switch...
-  SmartSwitchController* controller = new SmartSwitchController(true);
-  controller->connect_to(load_switch);
+  // Create a switch controller to handle the user press logic. Its output
+  // is uniform "load powered" semantics (v2-powered) for every relay,
+  // regardless of contact type — auto-initialize is disabled here because
+  // the correct initial value depends on contact_type (below), not on the
+  // library's built-in "off" default.
+  SmartSwitchController* controller = new SmartSwitchController(false);
+
+  // The controller drives the physical coil through a ContactMapTransform,
+  // which is the only place NC/NO inversion happens.
+  controller->connect_to(new ContactMapTransform(contact_type))
+      ->connect_to(load_switch);
 
   // In addition to the manual button "click types", a
   // SmartSwitchController accepts explicit state settings via
@@ -103,21 +132,33 @@ SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
   // requests made to the Signal K server to set the switch state.
   // This allows any device on the SignalK network that can make
   // such a request to also control the state of our switch.
+  // The wire value here always means "device POWERED" (v2-powered), for
+  // both NC and NO relays.
 
   auto* sk_listener = new StringSKPutRequestListener(sk_path);
 
   sk_listener->connect_to(controller->truthy_string_consumer_);
 
   sk_listener->connect_to(new LambdaConsumer<String>(
-      [controller, contact_type, reboot_time_ms](String value) {
+      [controller, reboot_time_ms](String value) {
     if (value == "reboot") {
-        reboot_sequence(controller, reboot_time_ms, contact_type);
+        reboot_sequence(controller, reboot_time_ms);
     }
     }));
 
-
-  load_switch->connect_to(new Repeat<bool, bool>(600000))
+  // Report LOAD state (device powered), not raw coil state — mirror the
+  // coil back through the same (self-inverse) ContactMapTransform.
+  load_switch->connect_to(new ContactMapTransform(contact_type))
+      ->connect_to(new Repeat<bool, bool>(600000))
       ->connect_to(new SKOutputBool(sk_path, config_path_sk_output));
+
+  // Emit the correct initial load state once the event loop starts, derived
+  // from the known boot coil state (LOW/false) rather than the library's
+  // "off" default — this is what keeps NC relays reporting "powered" at
+  // boot instead of the controller incorrectly re-energizing the coil.
+  event_loop()->onDelay(0, [controller, contact_type]() {
+    controller->emit(map_load_coil(false, contact_type));
+  });
 
   // Setup a ValueListener so changing the value with a SK plugin can cause
   // the relay to turn on or off
@@ -134,9 +175,9 @@ SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
 
   auto* reboot_listener = new SKValueListener<bool>(reboot_path);
     reboot_listener->connect_to(new LambdaConsumer<bool>(
-      [controller, contact_type, reboot_time_ms](bool value) {
+      [controller, reboot_time_ms](bool value) {
     if (value) {
-        reboot_sequence(controller, reboot_time_ms, contact_type);
+        reboot_sequence(controller, reboot_time_ms);
     }
     }));
 
@@ -262,7 +303,7 @@ static void watchdog_tick(SmartSwitchController* router_ctrl) {
     p.putUInt("holdoff_s", 0);
     p.putBool("esp_rst", false);
     p.end();
-    reboot_sequence(router_ctrl, 60000, false);  // NC: cut power 60s then restore
+    reboot_sequence(router_ctrl, 60000);  // uniform load semantics: cut power 60s then restore
     return;
   }
 
@@ -327,6 +368,14 @@ void setup() {
   event_loop()->onRepeat(60000, [relay_controller3]() {
     watchdog_tick(relay_controller3);
   });
+
+  // Semantics marker (fixer #1224 / ADR 0055 §4): app-side code (cruising-app,
+  // the powerNet PNP reconciler) gates actuation on this exact string to
+  // avoid double-inverting NC relay commands. Emitted once at startup and
+  // every 60s thereafter so it's picked up on (re)connect.
+  auto* semantics_marker = new StringConstantSensor(String("v2-powered"), 60);
+  semantics_marker->connect_to(
+      new SKOutputString("electrical." + groupName + ".semantics"));
 }
 
 void loop() {
