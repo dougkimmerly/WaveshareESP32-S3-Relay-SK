@@ -22,6 +22,18 @@
 
 #include "contact_mapping.h"
 
+// Command-loss timer + commit-confirm (fixer ADR 0055 §4, job 2/4). Pure
+// C++ header-only modules — see test/test_command_loss_timer.cpp and
+// test/test_commit_confirm.cpp for their host-native test coverage.
+// #included here only to prove they compile clean under this firmware's
+// ESP32/Arduino toolchain (acceptance criterion: `pio run` stays green);
+// wiring them into the live relay/SignalK control flow, and threading the
+// REBOOT2_HMAC_SECRET build flag through, is deferred to a follow-up job so
+// this one doesn't touch the boot fail-safe path or any running behavior.
+#include "auth_token.h"
+#include "command_loss_timer.h"
+#include "commit_confirm.h"
+
 using namespace sensesp;
 
 // Wraps the pure map_load_coil() logic (contact_mapping.h) as a SensESP

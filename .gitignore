@@ -3,3 +3,8 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Local-only build flags (HMAC secret for the command-loss timer /
+# commit-confirm layer, fixer ADR 0055 §4). SOPS-sourced at bench/deploy
+# time — see docs/command-loss-timer.md. Never commit the real secret.
+secrets.local.ini

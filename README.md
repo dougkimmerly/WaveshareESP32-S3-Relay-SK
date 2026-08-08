@@ -77,10 +77,15 @@ RelayInfo relays[] = {
 
 ---
 
-**Testing:** The NC/NO wire-semantics mapping (`src/contact_mapping.h`) is pure
-logic with no Arduino dependency, so it has a plain g++ host test instead of
-requiring hardware or the PlatformIO toolchain:
+**Testing:** The NC/NO wire-semantics mapping (`src/contact_mapping.h`) and the
+command-loss-timer / commit-confirm layer (`src/command_loss_timer.h`,
+`src/commit_confirm.h`, `src/auth_token.h`, `src/hmac_sha256.h`,
+`src/wall_clock.h` — see `docs/command-loss-timer.md`) are pure logic with no
+Arduino dependency, so they have plain g++ host tests instead of requiring
+hardware or the PlatformIO toolchain:
 
 ```sh
-g++ -std=c++17 -Isrc test/test_contact_mapping.cpp -o /tmp/test_contact_mapping && /tmp/test_contact_mapping
+for t in contact_mapping hmac_sha256 command_loss_timer commit_confirm; do
+  g++ -std=c++17 -Isrc "test/test_${t}.cpp" -o "/tmp/test_${t}" && "/tmp/test_${t}"
+done
 ```
