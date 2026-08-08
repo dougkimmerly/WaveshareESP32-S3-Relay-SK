@@ -3,6 +3,58 @@
 Cross-domain and unattended-job discoveries that need a human decision or a
 follow-up job, kept here so they don't evaporate. Newest first.
 
+## 2026-08-08 — CLT/commit-confirm wired live (job 5/4); bench checklist is now unblocked
+
+**Source:** cross-domain request from fixer CC, job 5 (fixer ADR 0055 §4
+follow-up), asking for the wiring the entry below flagged as a prerequisite.
+
+**What shipped:** `src/main.cpp` now instantiates
+`reboot2::clt::CommandLossTimer` + `reboot2::confirm::CommitConfirmGuard`
+live, gated on `REBOOT2_HMAC_SECRET`; a single actuation seam (each relay's
+`SmartSwitchController`) carries PUT, `electrical.commands.switch.*`,
+button, reboot, and CLT-rung commands alike; commit-confirm interposes on
+externally-sourced WAN-chain (1-4) power-cuts only (reboots and CLT-driven
+actions are exempt, matching the module's existing `is_reboot` semantics);
+an authenticated home-contact token PUT path
+(`electrical.reboot2.clt.contactToken`) and per-relay confirm token paths
+reset/confirm the timer; CLT/commit-confirm state publishes to
+`electrical.reboot2.clt.*`/`confirm.*`; the ESP32 SDK's built-in SNTP client
+(`configTime()`) feeds the wall clock instead of a hand-rolled NTP client.
+Full detail in `docs/command-loss-timer.md` ("Armed vs. disarmed", "Live
+wiring", "SignalK paths"). Boot fail-safe verified untouched — CLT/confirm
+objects are constructed strictly after all 6 relays' boot-safe
+`digitalWrite(pin, LOW)` calls (see `README.md`). `pio run
+-e pioarduino_esp32s3` green both with and without `secrets.local.ini`
+(this job also fixed a latent bug in that plumbing — see below). Host tests
+green, including a new `test/test_auth_token.cpp` for the token wire-format
+parser and a `last_contact_mono()` getter test in
+`test/test_command_loss_timer.cpp`.
+
+**Deviation from the job text — no accelerated-time build flag.** The job
+asked for the wiring but not the accelerated-time mechanism the entry below
+also called out as a bench-checklist prerequisite; that's still a genuine
+design decision (compile-time scale factor on the monotonic clock vs. an
+injected fake-RTC) belonging to Doug, not something to freelance. Not
+needed for `pio run`/host-test acceptance, only for a bench soak walking
+every CLT rung in real time — see the recommendation below.
+
+**Also fixed in this job:** `secrets.local.ini`'s `[env]` section was
+silently REPLACING (not merging with) `platformio.ini`'s own `[env]
+build_flags` — a real, previously-unexercised bug (job 4's entry below notes
+nothing had ever consumed `REBOOT2_HMAC_SECRET`, so a populated
+`secrets.local.ini` had never actually been build-tested). `pio run` with a
+real secret present failed outright with SensESP's `#error` on missing
+`CORE_DEBUG_LEVEL`. Fixed by moving the two secret flags to their own
+`[secrets]` section, interpolated additively into `[env]` — see
+`platformio.ini` and `secrets.local.ini.example`.
+
+**Recommendation:** `docs/bench-checklist.md` (job 4's ask) can now be
+written truthfully — the wiring it depends on has landed. It still needs
+Doug's decision on the accelerated-time mechanism (see above) before a
+useful bench walkthrough script can be written, and needs the actual bench
+hardware (spare ESP32-S3-Relay-6CH) to verify against, not just to write
+words describing steps.
+
 ## 2026-08-08 — bench soak checklist (job 4/4) deferred; needs a wiring job first
 
 **Source:** cross-domain request from fixer CC, job 4 of 4 (fixer ADR 0055),

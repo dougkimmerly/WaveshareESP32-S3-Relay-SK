@@ -87,10 +87,20 @@ have plain g++ host tests instead of requiring hardware or the PlatformIO
 toolchain:
 
 ```sh
-for t in contact_mapping hmac_sha256 command_loss_timer commit_confirm internet_probe; do
+for t in contact_mapping hmac_sha256 auth_token command_loss_timer commit_confirm internet_probe; do
   g++ -std=c++17 -Isrc "test/test_${t}.cpp" -o "/tmp/test_${t}" && "/tmp/test_${t}"
 done
 ```
+
+**Command-loss timer / commit-confirm (fixer ADR 0055 §4, job 5/4):** wired
+live into `src/main.cpp`'s relay control flow as of this job, gated on
+`REBOOT2_HMAC_SECRET` (see `secrets.local.ini.example`) — with no secret at
+build time it compiles out entirely and every relay stays fully manual,
+loudly published as `electrical.reboot2.clt.armed = false`. See
+`docs/command-loss-timer.md` for the armed/disarmed behavior table, the full
+`clt.*`/`confirm.*` SignalK path list, and the boot fail-safe verification
+note. `pio run -e pioarduino_esp32s3` is green both with and without
+`secrets.local.ini` present.
 
 **Watchdog observability:** the router watchdog's fail counters, circuit-
 breaker state, and the internet-reachability probe (fixer ADR 0055 §4, job

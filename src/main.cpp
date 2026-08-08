@@ -18,18 +18,19 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <Preferences.h>
+#include <time.h>
 #include "esp_system.h"
+#include "esp_timer.h"
 
 #include "contact_mapping.h"
 
-// Command-loss timer + commit-confirm (fixer ADR 0055 §4, job 2/4). Pure
-// C++ header-only modules — see test/test_command_loss_timer.cpp and
-// test/test_commit_confirm.cpp for their host-native test coverage.
-// #included here only to prove they compile clean under this firmware's
-// ESP32/Arduino toolchain (acceptance criterion: `pio run` stays green);
-// wiring them into the live relay/SignalK control flow, and threading the
-// REBOOT2_HMAC_SECRET build flag through, is deferred to a follow-up job so
-// this one doesn't touch the boot fail-safe path or any running behavior.
+// Command-loss timer + commit-confirm (fixer ADR 0055 §4, job 2/4, wired
+// live in job 5/4 follow-up). Pure C++ header-only modules — see
+// test/test_command_loss_timer.cpp, test/test_commit_confirm.cpp and
+// test/test_auth_token.cpp for their host-native test coverage. Wired into
+// the live relay/SignalK control flow below, gated entirely on whether
+// REBOOT2_HMAC_SECRET was supplied at build time — see the "CLT / commit-
+// confirm runtime" section and docs/command-loss-timer.md.
 #include "auth_token.h"
 #include "command_loss_timer.h"
 #include "commit_confirm.h"
@@ -105,6 +106,72 @@ String getSkOutput(const String& relayName) {
   return "/sensesp-" + relayName;
 }
 
+// ─── CLT / Commit-Confirm runtime (fixer ADR 0055 §4, job 5/4 follow-up) ───
+//
+// Wires src/command_loss_timer.h + src/commit_confirm.h into the live relay
+// control flow. Armed only when REBOOT2_HMAC_SECRET was supplied at build
+// time (secrets.local.ini — see secrets.local.ini.example and
+// docs/command-loss-timer.md); with no secret this whole block compiles
+// out and every relay stays exactly as manual as it was before this job —
+// `pio run` stays green either way (acceptance criterion). The armed/
+// disarmed state itself is always published to SignalK (see setup()) so
+// home can tell the CLT is not protecting the boat without a bench
+// connection, even on a build with the secret absent.
+//
+// relay_id numbering matches the relays[] array position (1 = relays[0] =
+// starlinkInverter, ... 6 = relays[5] = relay6), which is also exactly the
+// numbering CommitConfirmGuard::is_wan_relay() and the doc's "relays 1-4"
+// language already use.
+#ifdef REBOOT2_HMAC_SECRET
+
+static reboot2::clt::CommandLossTimer* g_clt = nullptr;
+static reboot2::confirm::CommitConfirmGuard* g_confirm = nullptr;
+
+// One controller pointer per logical relay id (index 0 unused) so CLT rung
+// actions and commit-confirm reverts can drive relays through the very same
+// actuation seam (SmartSwitchController::switch_consumer_ / ::emit) that
+// the PUT and electrical.commands.switch.* listeners already use.
+static SmartSwitchController* g_relay_ctrl[7] = {nullptr};
+static bool g_relay_powered[7] = {false};
+// Set true immediately before a system-driven (reboot pulse, CLT rung
+// action, commit-confirm revert) call into the actuation seam so the
+// observer attached in initialize_relay() below does not re-track its own
+// system-issued command — mirrors the "reboot commands exempt" rule these
+// other self-justified system actions share. Consumed (reset to false) by
+// that same observer the instant it fires.
+static bool g_skip_confirm_once[7] = {false};
+
+static void mark_system_driven_relay_change(int relay_id) {
+  if (relay_id >= 1 && relay_id <= 6) g_skip_confirm_once[relay_id] = true;
+}
+
+// esp_timer_get_time() is a 64-bit microsecond counter that never wraps in
+// any realistic uptime (unlike millis(), which wraps every ~49.7 days —
+// unacceptable for a timer meant to track weeks of no-contact during
+// stored-boat). This is the CLT's now_mono.
+static uint64_t clt_now_mono() {
+  return static_cast<uint64_t>(esp_timer_get_time() / 1000000LL);
+}
+
+// ESP32 Arduino's SNTP-backed time() is itself an anchor + monotonic-drift
+// clock, the same model wall_clock.h implements — reusing it here is the
+// smallest correct way to give the CLT/commit-confirm freshness check
+// (auth::verify_and_accept) a real wall-clock reading without hand-rolling
+// an NTP client (configTime() below arms the SDK's built-in SNTP client).
+// Returns 0 (sentinel: "no wall-clock yet") before the first sync lands,
+// which fails every token's freshness check safely closed rather than
+// open — no worse than the CLT not being wired at all.
+static uint64_t clt_now_wall() {
+  time_t t = time(nullptr);
+  return t > 1700000000 ? static_cast<uint64_t>(t) : 0;
+}
+
+#else  // !REBOOT2_HMAC_SECRET
+
+static void mark_system_driven_relay_change(int /*relay_id*/) {}
+
+#endif  // REBOOT2_HMAC_SECRET
+
 ////////////////////////////////////////////////////////
 // Function to perform a reboot sequence on a normally open or normally closed relay
 // along with a SignalK plugin to monitor devices it can set a reboot
@@ -113,17 +180,33 @@ String getSkOutput(const String& relayName) {
 // by sending a PUT request with the value "reboot" to the state path of the relay
 ////////////////////////////////////////////////////////
 
+// Marks relay_id's next state change as system-driven (reboot pulse, or a
+// CLT rung action) so the commit-confirm observer (see "CLT / commit-
+// confirm runtime" below) does not track it as an externally-sourced
+// command needing a confirm — same exemption the commit-confirm module
+// already gives reboots by construction (CommitConfirmGuard::submit's
+// is_reboot param). A no-op when the CLT isn't armed. Forward-declared here
+// so reboot_sequence (used by both the plain reboot listeners and, later,
+// the CLT's power-cycle rung) can mark itself exempt regardless of caller.
+static void mark_system_driven_relay_change(int relay_id);
+
 // Uniform load semantics (v2-powered): the controller always operates in
 // terms of "is the device powered", regardless of NC/NO contact type — the
 // ContactMapTransform on its output handles the physical inversion. A
-// reboot is always: cut power, wait, restore power.
-void reboot_sequence(SmartSwitchController* controller, uint32_t on_ms) {
+// reboot is always: cut power, wait, restore power. relay_id (1-6, matching
+// the relays[] array position) is used only to exempt this cut from
+// commit-confirm tracking, same as any other system-driven action — pass 0
+// for a relay that has no logical id (there is none in this firmware, but
+// keeps the parameter meaningful rather than assumed).
+void reboot_sequence(SmartSwitchController* controller, int relay_id, uint32_t on_ms) {
+  mark_system_driven_relay_change(relay_id);
   controller->emit(false);
   event_loop()->onDelay(on_ms, [controller] { controller->emit(true); });
 }
 
 SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
                                         String config_path_sk_output,
+                                        int relay_id,
                                         bool contact_type = false,
                                         int reboot_time_ms = 60000
                               ) {
@@ -149,6 +232,33 @@ SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
   controller->connect_to(new ContactMapTransform(contact_type))
       ->connect_to(load_switch);
 
+#ifdef REBOOT2_HMAC_SECRET
+  // Commit-confirm interposition (fixer ADR 0055 §4, job 5/4 follow-up):
+  // this parallel observer sees every state change the controller emits,
+  // from whichever source drove it — the PUT listener, the
+  // electrical.commands.switch.* listener, the physical button, a reboot
+  // pulse, or a CLT rung action — because they all funnel through this one
+  // controller's emit()/switch_consumer_/truthy_string_consumer_. That
+  // makes this the single actuation seam the job asked for: reboot pulses
+  // and CLT rung actions mark themselves exempt via
+  // mark_system_driven_relay_change() before they act (consumed here as
+  // `skip`), so only externally-sourced WAN-chain (relays 1-4) power-cuts
+  // ever get tracked as provisional by CommitConfirmGuard::submit().
+  g_relay_ctrl[relay_id] = controller;
+  g_relay_powered[relay_id] = map_load_coil(false, contact_type);  // matches the boot-derived initial emit below
+  controller->attach([relay_id, controller]() {
+    bool new_state = controller->get();
+    bool prior = g_relay_powered[relay_id];
+    if (new_state == prior) return;
+    bool skip = g_skip_confirm_once[relay_id];
+    g_skip_confirm_once[relay_id] = false;
+    if (g_confirm != nullptr) {
+      g_confirm->submit(relay_id, new_state, prior, /*is_reboot=*/skip, clt_now_mono());
+    }
+    g_relay_powered[relay_id] = new_state;
+  });
+#endif
+
   // In addition to the manual button "click types", a
   // SmartSwitchController accepts explicit state settings via
   // any boolean producer as well as any "truth" values in human readable
@@ -165,9 +275,9 @@ SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
   sk_listener->connect_to(controller->truthy_string_consumer_);
 
   sk_listener->connect_to(new LambdaConsumer<String>(
-      [controller, reboot_time_ms](String value) {
+      [controller, relay_id, reboot_time_ms](String value) {
     if (value == "reboot") {
-        reboot_sequence(controller, reboot_time_ms);
+        reboot_sequence(controller, relay_id, reboot_time_ms);
     }
     }));
 
@@ -200,9 +310,9 @@ SmartSwitchController* initialize_relay(uint8_t pin, String sk_path,
 
   auto* reboot_listener = new SKValueListener<bool>(reboot_path);
     reboot_listener->connect_to(new LambdaConsumer<bool>(
-      [controller, reboot_time_ms](bool value) {
+      [controller, relay_id, reboot_time_ms](bool value) {
     if (value) {
-        reboot_sequence(controller, reboot_time_ms);
+        reboot_sequence(controller, relay_id, reboot_time_ms);
     }
     }));
 
@@ -401,7 +511,7 @@ static void watchdog_tick(SmartSwitchController* router_ctrl) {
     p.putBool("esp_rst", false);
     publish_watchdog_state(fail_s, reboots + 1, true);
     p.end();
-    reboot_sequence(router_ctrl, 60000);  // uniform load semantics: cut power 60s then restore
+    reboot_sequence(router_ctrl, /*relay_id=*/3, 60000);  // pepRouter — cut power 60s then restore
     return;
   }
 
@@ -430,6 +540,123 @@ static void internet_probe_tick() {
              INTERNET_CONFIRM_TICKS);
   }
 }
+
+// ─── CLT / Commit-Confirm observability + tick (fixer ADR 0055 §4, job 5/4
+// follow-up) ─────────────────────────────────────────────────────────────
+//
+// electrical.reboot2.clt.armed is published unconditionally (both armed and
+// disarmed builds) so home/forensics can tell from SignalK alone whether
+// the CLT is actually protecting the boat, per the job's requirement that
+// disarmed mode be "loudly visible on the semantics/status SK paths" — see
+// setup(). The rest of this section only exists when armed.
+
+static SKOutputBool* g_sk_clt_armed = nullptr;
+
+#ifdef REBOOT2_HMAC_SECRET
+
+static SKOutputString* g_sk_clt_rung                  = nullptr;
+static SKOutputInt*    g_sk_clt_seconds_since_contact = nullptr;
+static SKOutputBool*   g_sk_clt_terminal_window_open  = nullptr;
+static SKOutputBool*   g_sk_clt_fleetone_window_open  = nullptr;
+static SKOutputInt*    g_sk_confirm_pending_count     = nullptr;
+static SKOutputBool*   g_sk_confirm_relay_pending[5]  = {nullptr};  // index 1-4 used
+
+static const char* clt_rung_name(reboot2::clt::Rung rung) {
+  switch (rung) {
+    case reboot2::clt::Rung::kNormal:   return "normal";
+    case reboot2::clt::Rung::kRung12h:  return "12h";
+    case reboot2::clt::Rung::kRung24h:  return "24h";
+    case reboot2::clt::Rung::kTerminal: return "terminal";
+  }
+  return "unknown";
+}
+
+// Applies a CLT-rung- or commit-confirm-revert-driven relay change through
+// the single actuation seam (same as initialize_relay wires the PUT/
+// commands.switch listeners to) and marks it exempt from commit-confirm
+// re-tracking — see mark_system_driven_relay_change().
+static void clt_apply_relay(int relay_id, bool powered) {
+  SmartSwitchController* ctrl = g_relay_ctrl[relay_id];
+  if (ctrl == nullptr) return;
+  mark_system_driven_relay_change(relay_id);
+  ctrl->switch_consumer_.set(powered);
+}
+
+static void publish_clt_confirm_state() {
+  if (g_sk_clt_rung) g_sk_clt_rung->set(String(clt_rung_name(g_clt->rung())));
+  if (g_sk_clt_terminal_window_open) g_sk_clt_terminal_window_open->set(g_clt->terminal_window_open());
+  if (g_sk_clt_fleetone_window_open) g_sk_clt_fleetone_window_open->set(g_clt->fleetone_window_open());
+  if (g_sk_clt_seconds_since_contact) {
+    uint64_t now_mono = clt_now_mono();
+    uint64_t elapsed = now_mono >= g_clt->last_contact_mono() ? now_mono - g_clt->last_contact_mono() : 0;
+    g_sk_clt_seconds_since_contact->set(static_cast<int>(elapsed));
+  }
+  int pending = 0;
+  for (int r = 1; r <= 4; r++) {
+    bool has_pending = g_confirm->has_pending(r);
+    if (has_pending) pending++;
+    if (g_sk_confirm_relay_pending[r]) g_sk_confirm_relay_pending[r]->set(has_pending);
+  }
+  if (g_sk_confirm_pending_count) g_sk_confirm_pending_count->set(pending);
+}
+
+// Runs every 60s: advances the CLT and commit-confirm state machines and
+// applies whatever Actions/Reverts they return through the actuation seam,
+// then publishes the resulting state to SignalK. This is the only place
+// CLT Actions turn into real relay commands.
+static void clt_confirm_tick() {
+  uint64_t now_mono = clt_now_mono();
+  uint64_t now_wall = clt_now_wall();
+  if (now_wall > 0) g_clt->sync_wall_clock(now_wall, now_mono);
+
+  for (reboot2::clt::Action action : g_clt->tick(now_mono)) {
+    switch (action) {
+      case reboot2::clt::Action::kForceWanRelaysOn:
+        ESP_LOGW("CLT", "T+12h no authenticated home contact — forcing WAN relays 1-4 ON");
+        for (int r = 1; r <= 4; r++) clt_apply_relay(r, true);
+        break;
+      case reboot2::clt::Action::kPowerCycleStarlinkAndPep:
+        ESP_LOGW("CLT", "T+24h no authenticated home contact — power-cycling starlinkInverter + pepRouter");
+        reboot_sequence(g_relay_ctrl[1], 1, 60000);
+        reboot_sequence(g_relay_ctrl[3], 3, 60000);
+        break;
+      case reboot2::clt::Action::kEnterTerminalPosture:
+        ESP_LOGE("CLT", "T+48h no authenticated home contact — entering terminal posture");
+        break;
+      case reboot2::clt::Action::kExitToNormal:
+        ESP_LOGI("CLT", "authenticated home contact restored — CLT back to Normal");
+        break;
+      case reboot2::clt::Action::kTerminalWindowOpen:
+        ESP_LOGI("CLT", "terminal posture: daily WAN-chain window open (16:00 UTC)");
+        for (int r = 1; r <= 4; r++) clt_apply_relay(r, true);
+        break;
+      case reboot2::clt::Action::kTerminalWindowClose:
+        ESP_LOGI("CLT", "terminal posture: daily WAN-chain window closed (18:00 UTC)");
+        for (int r = 1; r <= 4; r++) clt_apply_relay(r, false);
+        break;
+      case reboot2::clt::Action::kFleetOneWindowOpen:
+        ESP_LOGI("CLT", "FleetOne daily window open (16:00 UTC)");
+        clt_apply_relay(5, true);
+        break;
+      case reboot2::clt::Action::kFleetOneWindowClose:
+        ESP_LOGI("CLT", "FleetOne daily window closed (16:30 UTC)");
+        clt_apply_relay(5, false);
+        break;
+      case reboot2::clt::Action::kNone:
+        break;
+    }
+  }
+
+  for (const reboot2::confirm::Revert& revert : g_confirm->tick(now_mono)) {
+    ESP_LOGW("CONFIRM", "relay%d power-cut unconfirmed after 15 min — reverting to powered=%s",
+             revert.relay_id, revert.revert_to_powered_state ? "true" : "false");
+    clt_apply_relay(revert.relay_id, revert.revert_to_powered_state);
+  }
+
+  publish_clt_confirm_state();
+}
+
+#endif  // REBOOT2_HMAC_SECRET
 
 
 void setup() {
@@ -477,30 +704,33 @@ void setup() {
 
   // initialize the relays and write up everything to Signal K
 
+  // relay_id (2nd-to-last arg, 1-6) matches the relays[] array position —
+  // also the numbering CommitConfirmGuard::is_wan_relay() and the CLT
+  // wiring below use for relays 1-4 (the WAN chain).
   auto relay_controller1 = initialize_relay(relays[0].pin,
                         getSkPath(relays[0].name),
                         getSkOutput(relays[0].name),
-                        relays[0].NO, relays[0].ms);
+                        1, relays[0].NO, relays[0].ms);
   auto relay_controller2 = initialize_relay(relays[1].pin,
                         getSkPath(relays[1].name),
                         getSkOutput(relays[1].name),
-                        relays[1].NO, relays[1].ms);
+                        2, relays[1].NO, relays[1].ms);
   auto relay_controller3 = initialize_relay(relays[2].pin,
                         getSkPath(relays[2].name),
                         getSkOutput(relays[2].name),
-                        relays[2].NO, relays[2].ms);
+                        3, relays[2].NO, relays[2].ms);
   auto relay_controller4 = initialize_relay(relays[3].pin,
                         getSkPath(relays[3].name),
                         getSkOutput(relays[3].name),
-                        relays[3].NO, relays[3].ms);
+                        4, relays[3].NO, relays[3].ms);
   auto relay_controller5 = initialize_relay(relays[4].pin,
                         getSkPath(relays[4].name),
                         getSkOutput(relays[4].name),
-                        relays[4].NO, relays[4].ms);
+                        5, relays[4].NO, relays[4].ms);
   auto relay_controller6 = initialize_relay(relays[5].pin,
                         getSkPath(relays[5].name),
                         getSkOutput(relays[5].name),
-                        relays[5].NO, relays[5].ms);
+                        6, relays[5].NO, relays[5].ms);
 
   // Register router watchdog — checks every 60s, acts on pepRouter relay (relay 3)
   event_loop()->onRepeat(60000, [relay_controller3]() {
@@ -518,6 +748,92 @@ void setup() {
   auto* semantics_marker = new StringConstantSensor(String("v2-powered"), 60);
   semantics_marker->connect_to(
       new SKOutputString("electrical." + groupName + ".semantics"));
+
+  // CLT / commit-confirm runtime (fixer ADR 0055 §4, job 5/4 follow-up).
+  // g_sk_clt_armed is published either way — see the "CLT / Commit-Confirm
+  // observability" section above for why disarmed-mode visibility matters.
+  g_sk_clt_armed = new SKOutputBool(
+      "electrical." + groupName + ".clt.armed", "/sensesp-cltArmed");
+#ifdef REBOOT2_HMAC_SECRET
+  g_clt = new reboot2::clt::CommandLossTimer(std::string(REBOOT2_HMAC_SECRET));
+  g_confirm = new reboot2::confirm::CommitConfirmGuard(std::string(REBOOT2_HMAC_SECRET));
+  g_clt->begin(clt_now_mono());
+
+  // Arms the ESP32 SDK's built-in SNTP client (see clt_now_wall() above) —
+  // the CLT/commit-confirm freshness check needs a real wall-clock reading
+  // to authenticate tokens at all. Read-only, well-known NTP pool, no
+  // relay-safety implication; falls back to clt_now_wall()'s 0 sentinel
+  // (fail closed) until the first sync lands.
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+
+  g_sk_clt_rung = new SKOutputString("electrical." + groupName + ".clt.rung");
+  g_sk_clt_seconds_since_contact = new SKOutputInt(
+      "electrical." + groupName + ".clt.secondsSinceContact", "/sensesp-cltSecondsSinceContact");
+  g_sk_clt_terminal_window_open = new SKOutputBool(
+      "electrical." + groupName + ".clt.terminalWindowOpen", "/sensesp-cltTerminalWindowOpen");
+  g_sk_clt_fleetone_window_open = new SKOutputBool(
+      "electrical." + groupName + ".clt.fleetoneWindowOpen", "/sensesp-cltFleetoneWindowOpen");
+  g_sk_confirm_pending_count = new SKOutputInt(
+      "electrical." + groupName + ".confirm.pendingCount", "/sensesp-confirmPendingCount");
+  for (int r = 1; r <= 4; r++) {
+    g_sk_confirm_relay_pending[r] = new SKOutputBool(
+        "electrical." + groupName + ".confirm.relay" + String(r) + ".pending",
+        "/sensesp-confirmRelay" + String(r) + "Pending");
+  }
+
+  // Authenticated home-contact token: PUT a "<unix_ts>:<64-hex-char HMAC>"
+  // string (see src/auth_token.h) to reset the CLT to Normal. Any other
+  // traffic (link-layer, unauthenticated PUTs elsewhere) never reaches
+  // process_token() and so can never reset the timer — see
+  // docs/command-loss-timer.md.
+  auto* clt_token_listener =
+      new StringSKPutRequestListener("electrical." + groupName + ".clt.contactToken");
+  clt_token_listener->connect_to(new LambdaConsumer<String>([](String value) {
+    reboot2::auth::Token token;
+    if (!reboot2::auth::parse_token(std::string(value.c_str()), &token)) {
+      ESP_LOGW("CLT", "contactToken: malformed value, ignoring");
+      return;
+    }
+    if (g_clt->process_token(token, clt_now_wall(), clt_now_mono())) {
+      ESP_LOGI("CLT", "authenticated home contact accepted");
+    } else {
+      ESP_LOGW("CLT", "contactToken: verification failed (stale, replayed, or bad MAC)");
+    }
+  }));
+
+  // Commit-confirm tokens, one path per WAN-chain relay (1-4): PUT the same
+  // "<unix_ts>:<64-hex-char HMAC>" wire format, scoped to that relay via
+  // confirm_token_context(), to confirm a pending power-cut before its
+  // 15-minute auto-revert deadline.
+  for (int r = 1; r <= 4; r++) {
+    String path = "electrical." + groupName + ".confirm.relay" + String(r) + ".token";
+    auto* confirm_listener = new StringSKPutRequestListener(path);
+    confirm_listener->connect_to(new LambdaConsumer<String>([r](String value) {
+      reboot2::auth::Token token;
+      if (!reboot2::auth::parse_token(std::string(value.c_str()), &token)) {
+        ESP_LOGW("CONFIRM", "relay%d token: malformed value, ignoring", r);
+        return;
+      }
+      if (g_confirm->confirm(r, token, clt_now_wall())) {
+        ESP_LOGI("CONFIRM", "relay%d power-cut confirmed", r);
+      } else {
+        ESP_LOGW("CONFIRM", "relay%d confirm failed (stale/replayed/bad MAC, or nothing pending)", r);
+      }
+    }));
+  }
+
+  event_loop()->onRepeat(60000, []() { clt_confirm_tick(); });
+  g_sk_clt_armed->set(true);
+  ESP_LOGI("CLT", "armed — REBOOT2_HMAC_SECRET present");
+#else
+  g_sk_clt_armed->set(false);
+  ESP_LOGW("CLT", "DISARMED — no REBOOT2_HMAC_SECRET at build time; all relays fully manual, "
+                   "no command-loss protection is running. See secrets.local.ini.example.");
+#endif
+  // Republish armed/disarmed every 60s too (same reconnect rationale as the
+  // semantics marker above) so it's picked up on SK server (re)connect, not
+  // only at boot.
+  event_loop()->onRepeat(60000, []() { g_sk_clt_armed->set(g_sk_clt_armed->get()); });
 }
 
 void loop() {

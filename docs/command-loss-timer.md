@@ -6,18 +6,107 @@ extracts the command-loss timer (CLT) and commit-confirm as pure-C++,
 header-only modules with an injected clock, so their logic is covered by
 fast host-native tests instead of only being reachable on real hardware.
 
-> **Status:** logic + tests only. `src/main.cpp` `#include`s these headers
-> to prove they compile under the ESP32/Arduino toolchain, but does not yet
-> wire them into the live relay/SignalK control flow or read
-> `REBOOT2_HMAC_SECRET`. That wiring — plus the NTP client, the SignalK log
-> entries for terminal-window open/close, and threading real confirm
-> requests through — is a follow-up job. The boot fail-safe path (all coils
-> LOW at reset → all NC loads powered) is untouched.
+> **Status:** wired live as of job 5/4 (fixer ADR 0055 §4 follow-up). See
+> "Armed vs. disarmed" and "Live wiring" below for how `src/main.cpp` uses
+> these modules. The boot fail-safe path (all coils LOW at reset → all NC
+> loads powered) remains untouched — CLT/commit-confirm objects are only
+> constructed at the very end of `setup()`, strictly after every relay's
+> boot-safe `digitalWrite(pin, LOW)` has already run (see `README.md`'s
+> "Boot fail-safe verification" note).
 >
 > **Job 4/4 update:** added the FleetOne window (see below) to
 > `command_loss_timer.h` as the same kind of pure-logic, host-tested-only
-> addition — still not wired into `main.cpp`. See `docs/HANDOFF.md` for why
-> the bench soak checklist requested alongside it wasn't written this job.
+> addition. Now wired the same way as the terminal window (job 5/4).
+
+## Armed vs. disarmed
+
+The whole CLT/commit-confirm runtime in `src/main.cpp` is gated on whether
+`REBOOT2_HMAC_SECRET` was supplied at build time:
+
+| | Armed (`secrets.local.ini` present) | Disarmed (no secret) |
+|---|---|---|
+| Relay control | CLT rungs / windows + commit-confirm can drive relays | Fully manual — PUT / `electrical.commands.switch.*` / physical button only, exactly as before this job |
+| `electrical.reboot2.clt.armed` | `true` | `false` |
+| Other `clt.*` / `confirm.*` SK paths | published every 60s | not created at all |
+| `electrical.reboot2.clt.contactToken` / `confirm.relay{1-4}.token` PUT listeners | active | not created |
+| `pio run` | green | green |
+
+`electrical.reboot2.clt.armed` is the one path that always exists, in both
+modes, republished every 60s (same reconnect rationale as the `semantics`
+marker) — that's what makes disarmed mode "loudly visible": home can tell
+the CLT is not protecting the boat from SignalK alone, without a bench
+connection.
+
+## SignalK paths (job 5/4)
+
+Published every 60s (`clt_confirm_tick()` in `src/main.cpp`), same tick
+cadence as the job 3 watchdog paths:
+
+| Path | Type | Meaning |
+|---|---|---|
+| `electrical.reboot2.clt.armed` | bool | Always published, armed or not — see "Armed vs. disarmed" above. |
+| `electrical.reboot2.clt.rung` | string | `"normal"` / `"12h"` / `"24h"` / `"terminal"`. Armed only. |
+| `electrical.reboot2.clt.secondsSinceContact` | int | `now_mono - last_contact_mono()`. Armed only. |
+| `electrical.reboot2.clt.terminalWindowOpen` | bool | Terminal posture's daily 16:00-18:00 UTC WAN-chain window. Armed only. |
+| `electrical.reboot2.clt.fleetoneWindowOpen` | bool | FleetOne's daily 16:00-16:30 UTC window (active from T+24h onward). Armed only. |
+| `electrical.reboot2.confirm.pendingCount` | int | How many of relays 1-4 currently have an unconfirmed provisional power-cut. Armed only. |
+| `electrical.reboot2.confirm.relay{1-4}.pending` | bool | Per-relay version of the above. Armed only. |
+
+PUT paths (armed only):
+
+| Path | Value | Effect |
+|---|---|---|
+| `electrical.reboot2.clt.contactToken` | `"<unix_ts>:<64-hex-char HMAC>"` | Authenticated home-contact token; resets the CLT to Normal on success. |
+| `electrical.reboot2.confirm.relay{1-4}.token` | `"<unix_ts>:<64-hex-char HMAC>"` | Confirms that relay's pending power-cut, scoped via `confirm_token_context(relay_id)`. |
+
+## Live wiring (job 5/4)
+
+- **Single actuation seam.** Every relay's `SmartSwitchController` is the
+  one place all commands funnel through — the PUT listener, the
+  `electrical.commands.switch.*` listener, the physical button, a reboot
+  pulse, and (when armed) CLT rung/window actions all ultimately call into
+  that same controller's `emit()`/`switch_consumer_`. `initialize_relay()`
+  attaches one parallel observer to each controller that sees every state
+  change from any of those sources uniformly.
+- **Commit-confirm interposition.** That observer calls
+  `CommitConfirmGuard::submit()` for every state change on relays 1-4.
+  Reboot pulses and CLT-driven actions call
+  `mark_system_driven_relay_change(relay_id)` immediately before they act,
+  which the observer consumes as `is_reboot=true` in the `submit()` call —
+  exempting them from tracking, the same way a literal reboot command
+  already was. Only externally-sourced commands (SK PUT,
+  `electrical.commands.switch.*`) get tracked as provisional and can be
+  auto-reverted 15 minutes later by `CommitConfirmGuard::tick()`
+  (`clt_confirm_tick()`, every 60s).
+- **Authenticated home-contact token.** PUT a
+  `"<unix_ts>:<64-hex-char HMAC>"` string (see `src/auth_token.h`'s
+  `parse_token()`, host-tested in `test/test_auth_token.cpp`) to
+  `electrical.reboot2.clt.contactToken` to reset the CLT. Commit-confirm
+  tokens use the same wire format at `electrical.reboot2.confirm.relay{1-4}.token`.
+- **Wall clock.** `src/main.cpp` arms the ESP32 SDK's built-in SNTP client
+  (`configTime()`) rather than hand-rolling an NTP client — it's the same
+  anchor + monotonic-drift model `wall_clock.h` already implements, so
+  reusing it is the smallest correct way to give `auth::verify_and_accept`'s
+  freshness check a real wall-clock reading. Before the first SNTP sync
+  lands, `clt_now_wall()` returns 0, which fails every token's freshness
+  check safely closed (no tokens accepted) rather than open. `now_mono` uses
+  `esp_timer_get_time()`, not `millis()` — `millis()` wraps every ~49.7
+  days, which would corrupt elapsed-since-contact math over the
+  weeks-to-months this is meant to run.
+- **CLT rung → relay action mapping** (`clt_confirm_tick()` in
+  `src/main.cpp`): `kForceWanRelaysOn`/`kTerminalWindowOpen` → relays 1-4
+  ON; `kPowerCycleStarlinkAndPep` → `reboot_sequence()` on relays 1 and 3;
+  `kTerminalWindowClose` → relays 1-4 OFF; `kFleetOneWindowOpen`/`Close` →
+  relay 5 ON/OFF; `kEnterTerminalPosture`/`kExitToNormal` → logged only (no
+  direct relay action — the window actions above already carry the actual
+  power transitions).
+- **Reset mid-CLT is the designed behavior, not a gap.** The CLT is a plain
+  heap object with no NVS persistence; an ESP reset re-runs `setup()`,
+  which re-derives every relay's state from the boot-safe coil position
+  (LOW) before the CLT is even constructed, then calls `g_clt->begin()`
+  with the current `now_mono` — i.e. a fresh 12h grace period, with relays
+  already in the boot-safe (all-NC-loads-powered) state. Reset can only
+  ever return the boat to *more* powered, never less.
 
 ## Files
 
@@ -157,21 +246,27 @@ The shared HMAC secret is never committed. At bench/deploy time:
    not in this repo.
 2. Before a build that needs the CLT/commit-confirm wired live, decrypt it
    into `secrets.local.ini` (gitignored — see `.gitignore` and
-   `secrets.local.ini.example` for the exact format), e.g.:
+   `secrets.local.ini.example` for the exact format). The flags go in a
+   `[secrets]` section, NOT `[env]` — see the comment above `[secrets]` in
+   `platformio.ini` for why (an `[env]` section here would silently drop
+   every other build flag instead of adding to them), e.g.:
    ```sh
    sops -d path/to/reboot2-hmac-secret.enc.yaml | \
      awk '{print "-D REBOOT2_HMAC_SECRET=\x27\"" $0 "\"\x27"}' \
-     > /tmp/flag && printf '[env]\nbuild_flags =\n    %s\n' "$(cat /tmp/flag)" > secrets.local.ini
+     > /tmp/flag && printf '[secrets]\nbuild_flags =\n    %s\n' "$(cat /tmp/flag)" > secrets.local.ini
    ```
    (adapt to however the secret is actually stored in SOPS — the point is
    the decrypted value only ever lands in the gitignored local file, never
    in git history or in `platformio.ini`.)
 3. `platformio.ini` has `extra_configs = secrets.local*.ini` (a glob, so
    PlatformIO no-ops when the file is absent — `pio run` stays green on a
-   clean checkout with no secret present at all, e.g. in this job's build).
-4. Once the follow-up job reads `REBOOT2_HMAC_SECRET` in `main.cpp`, that
-   flag becomes load-bearing for a real bench/deploy build; until then it's
-   inert.
+   clean checkout with no secret present at all) and interpolates
+   `${secrets.build_flags}` into `[env]`'s own `build_flags`, so a present
+   `secrets.local.ini` only ever adds the two `-D` flags rather than
+   replacing anything.
+4. `main.cpp` reads `REBOOT2_HMAC_SECRET` as of job 5/4 — see "Armed vs.
+   disarmed" above. `pio run -e pioarduino_esp32s3` is green both with and
+   without `secrets.local.ini` present (verified as part of that job).
 
 ## Host tests
 
@@ -179,7 +274,7 @@ Same pattern as `test/test_contact_mapping.cpp` — plain g++, no
 PlatformIO/Arduino toolchain required:
 
 ```sh
-for t in hmac_sha256 command_loss_timer commit_confirm; do
+for t in hmac_sha256 auth_token command_loss_timer commit_confirm; do
   g++ -std=c++17 -Isrc "test/test_${t}.cpp" -o "/tmp/test_${t}" && "/tmp/test_${t}"
 done
 ```

@@ -64,18 +64,18 @@ probe), under `electrical.reboot2.watchdog.*`:
 | `electrical.reboot2.watchdog.rebootCount` | int | Router reboots triggered since the last power-on reset or 7-day clean reset — the reboot/restart cycle counter. |
 | `electrical.reboot2.watchdog.holdoffActive` | bool | `true` while in the post-reboot exponential hold-off window. |
 
-### CLT state / commit-confirm pending state — deferred, not published
+### CLT state / commit-confirm pending state — now published (job 5/4)
 
-The original ask also requested publishing command-loss-timer (CLT) rung /
-seconds-since-contact and commit-confirm pending state. Those modules
-(`src/command_loss_timer.h`, `src/commit_confirm.h`, job 2) are still only
-`#include`d to prove they compile — job 2 explicitly deferred wiring them
-into the live relay/SignalK control flow to a follow-up job (see
-`docs/command-loss-timer.md`'s status banner). Publishing SK values for a
-CLT/commit-confirm system that isn't actually running would be fabricated,
-not observable, state. This job does not publish those two paths; wiring
-them in — and publishing their real state alongside — is properly the
-follow-up job that actually threads CLT/commit-confirm into `main.cpp`.
+The original ask (job 3) also requested publishing command-loss-timer (CLT)
+rung / seconds-since-contact and commit-confirm pending state. At the time,
+those modules (`src/command_loss_timer.h`, `src/commit_confirm.h`, job 2)
+were only `#include`d to prove they compile, not wired into the live relay/
+SignalK control flow — publishing SK values for a system that isn't
+actually running would have been fabricated, not observable, state. Job
+5/4 (fixer ADR 0055 §4 follow-up) wired them in; their real state is now
+published under `electrical.reboot2.clt.*` / `electrical.reboot2.confirm.*`
+— see `docs/command-loss-timer.md` for the full path list and the armed/
+disarmed behavior table.
 
 ## OTA password (build-time secret)
 

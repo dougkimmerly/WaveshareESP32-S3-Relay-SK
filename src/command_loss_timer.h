@@ -95,6 +95,10 @@ class CommandLossTimer {
   Rung rung() const { return rung_; }
   bool terminal_window_open() const { return terminal_window_open_; }
   bool fleetone_window_open() const { return fleetone_window_open_; }
+  // For observability publishing: caller computes elapsed = now_mono -
+  // last_contact_mono() rather than this class exposing "seconds since
+  // contact" directly, since only the caller knows its own current now_mono.
+  uint64_t last_contact_mono() const { return last_contact_mono_; }
 
   // Advances the state machine. now_mono drives elapsed-since-contact and
   // the terminal window's drift-fallback estimate; call on every loop tick

@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -55,6 +56,35 @@ inline Token make_token(const std::string& context, uint64_t ts, const std::stri
   t.mac = crypto::hmac_sha256(reinterpret_cast<const uint8_t*>(secret.data()), secret.size(),
                                payload.data(), payload.size());
   return t;
+}
+
+// Wire format for a token carried over a SignalK PUT string value:
+// "<decimal unix_timestamp>:<64 lowercase hex chars, the 32-byte MAC>".
+// Pure parsing only — does not verify the MAC, just decodes the wire shape,
+// so it can be host-tested (test/test_auth_token.cpp) independent of any
+// secret. Returns false (leaving *out unspecified) on any malformed input:
+// missing separator, non-numeric timestamp, or a hex part that isn't
+// exactly 64 characters of [0-9a-fA-F].
+inline bool parse_token(const std::string& raw, Token* out) {
+  auto sep = raw.find(':');
+  if (sep == std::string::npos || sep == 0) return false;
+  std::string ts_part = raw.substr(0, sep);
+  std::string mac_part = raw.substr(sep + 1);
+  if (mac_part.size() != 64) return false;
+
+  for (char c : ts_part) {
+    if (c < '0' || c > '9') return false;
+  }
+  for (char c : mac_part) {
+    bool is_hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    if (!is_hex) return false;
+  }
+
+  out->unix_timestamp = std::strtoull(ts_part.c_str(), nullptr, 10);
+  for (size_t i = 0; i < 32; i++) {
+    out->mac[i] = static_cast<uint8_t>(std::strtoul(mac_part.substr(i * 2, 2).c_str(), nullptr, 16));
+  }
+  return true;
 }
 
 inline bool constant_time_equal(const Mac& a, const Mac& b) {

@@ -106,6 +106,27 @@ void test_rungs_fire_and_reset() {
   std::printf("  test_rungs_fire_and_reset: ok\n");
 }
 
+// last_contact_mono() is the piece main.cpp needs to publish
+// "seconds since last authenticated contact" to SignalK (job 5/4
+// follow-up) — verify it starts at begin()'s value and only moves on a
+// successfully-verified token, never on a rejected one.
+void test_last_contact_mono_tracks_accepted_tokens_only() {
+  CommandLossTimer clt(kSecret);
+  clt.begin(100);
+  assert(clt.last_contact_mono() == 100);
+
+  // Bad token (wrong secret): must not move last_contact_mono().
+  auto bad = make_token("reboot2.clt.contact", 500, "wrong-secret");
+  assert(!clt.process_token(bad, 500, 9000));
+  assert(clt.last_contact_mono() == 100);
+
+  auto good = make_token("reboot2.clt.contact", 500, kSecret);
+  assert(clt.process_token(good, 500, 9000));
+  assert(clt.last_contact_mono() == 9000);
+
+  std::printf("  test_last_contact_mono_tracks_accepted_tokens_only: ok\n");
+}
+
 // --- Case 3: terminal window opens/closes at the right UTC times, both
 // under NTP and under millis-based drift fallback ---
 void test_terminal_window_ntp_and_drift() {
@@ -282,6 +303,7 @@ void test_fleetone_window() {
 int main() {
   test_bad_tokens_never_reset();
   test_rungs_fire_and_reset();
+  test_last_contact_mono_tracks_accepted_tokens_only();
   test_terminal_window_ntp_and_drift();
   test_fleetone_window();
   std::printf("test_command_loss_timer: all assertions passed\n");
