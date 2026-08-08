@@ -13,6 +13,11 @@ fast host-native tests instead of only being reachable on real hardware.
 > entries for terminal-window open/close, and threading real confirm
 > requests through — is a follow-up job. The boot fail-safe path (all coils
 > LOW at reset → all NC loads powered) is untouched.
+>
+> **Job 4/4 update:** added the FleetOne window (see below) to
+> `command_loss_timer.h` as the same kind of pure-logic, host-tested-only
+> addition — still not wired into `main.cpp`. See `docs/HANDOFF.md` for why
+> the bench soak checklist requested alongside it wasn't written this job.
 
 ## Files
 
@@ -48,8 +53,8 @@ vessel worse off than "no home contact" already implies):
 | T+ | Action |
 |---|---|
 | 12h | Force WAN-chain relays (1-4) to powered-ON |
-| 24h | NC-safe 60s power cycle of starlinkInverter + pepRouter |
-| 48h | Terminal posture (see below) |
+| 24h | NC-safe 60s power cycle of starlinkInverter + pepRouter; FleetOne window (relay 5) starts, see below |
+| 48h | Terminal posture (see below); FleetOne window keeps running unchanged |
 
 A valid token at any point — including from terminal posture — resets to
 normal immediately.
@@ -62,6 +67,32 @@ entering terminal posture, and every window open/close transition while in
 it must be logged to SignalK (both are `Action` values the caller is
 expected to log: `kEnterTerminalPosture`, `kTerminalWindowOpen`,
 `kTerminalWindowClose`).
+
+### FleetOne window (job 4/4, fixer ADR 0055 §6-7)
+
+A second, independent daily window, distinct from the terminal WAN-chain
+window above: once the CLT passes **T+24h** with no authenticated contact
+(one rung earlier than terminal posture, at `kRung24h`) it opens
+`fleetone_window_open_` at **16:00 UTC** and closes it at **16:30 UTC**,
+every day, and keeps doing so **forever, including all through terminal
+posture** — escalating from `kRung24h` to `kTerminal` does not interrupt or
+resync it. It only stops on a full reset to `Rung::kNormal` (any valid
+token), same as the terminal window. This is the intended control point for
+relay 5 (fleetOne — NO contact, default de-energized): energize for the
+30-minute window, then de-energize. `main.cpp` does not yet act on
+`Action::kFleetOneWindowOpen/Close` — see the wiring status banner above,
+same as the other CLT actions.
+
+A suspended satellite service just means the window's own connection
+attempt fails inside the 30 minutes — harmless by design; Doug enables the
+service shore-side once the home dead-man signal shows the boat is dark
+(provisioning lag ~1 day, window math verified in fixer ADR 0055 §6-7).
+
+`test/test_command_loss_timer.cpp`'s `test_fleetone_window` covers: no
+window before T+24h, open/close at 16:00/16:30 UTC once active, the window
+surviving the T+24h→T+48h escalation into terminal posture without being
+superseded by the terminal window's own (differently-timed) open/close, and
+an immediate close on reset to Normal.
 
 ### Time base and drift handling
 

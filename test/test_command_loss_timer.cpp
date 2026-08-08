@@ -181,10 +181,109 @@ void test_terminal_window_ntp_and_drift() {
   std::printf("  test_terminal_window_ntp_and_drift: ok\n");
 }
 
+// --- Case 4: fleetOne window (fixer ADR 0055 §6-7) opens/closes at
+// 16:00-16:30 UTC starting at T+24h (one rung earlier than terminal
+// posture's own window), and keeps firing daily straight through terminal
+// posture without being superseded by it. ---
+void test_fleetone_window() {
+  const uint64_t kMidnightUnix = 1'700'000'000ULL - (1'700'000'000ULL % 86400);
+
+  // Not yet active before T+24h: at T+12h, 16:00 UTC produces no window.
+  {
+    CommandLossTimer clt(kSecret);
+    clt.begin(0);
+    clt.sync_wall_clock(kMidnightUnix, 0);
+    clt.tick(12 * 3600);
+    assert(clt.rung() == Rung::kRung12h);
+    auto actions = clt.tick(16 * 3600);
+    assert(!clt.fleetone_window_open());
+    assert(!contains(actions, Action::kFleetOneWindowOpen));
+  }
+
+  // Active from T+24h: opens at 16:00 UTC, closes at 16:30 UTC (not 18:00 —
+  // that's the terminal window's own, separate close time).
+  {
+    CommandLossTimer clt(kSecret);
+    clt.begin(0);
+    clt.sync_wall_clock(kMidnightUnix, 0);
+    clt.tick(24 * 3600);
+    assert(clt.rung() == Rung::kRung24h);
+    assert(!clt.fleetone_window_open());
+
+    auto actions = clt.tick(24 * 3600 + 15 * 3600 + 59 * 60);  // 15:59 UTC
+    assert(!clt.fleetone_window_open());
+    assert(!contains(actions, Action::kFleetOneWindowOpen));
+
+    actions = clt.tick(24 * 3600 + 16 * 3600);  // 16:00 UTC
+    assert(clt.fleetone_window_open());
+    assert(contains(actions, Action::kFleetOneWindowOpen));
+
+    actions = clt.tick(24 * 3600 + 16 * 3600 + 29 * 60);  // 16:29 UTC: still open
+    assert(clt.fleetone_window_open());
+
+    actions = clt.tick(24 * 3600 + 16 * 3600 + 30 * 60);  // 16:30 UTC: closes
+    assert(!clt.fleetone_window_open());
+    assert(contains(actions, Action::kFleetOneWindowClose));
+  }
+
+  // Escalating from kRung24h into kTerminal does NOT close the fleetOne
+  // window early or skip a day — it keeps running through terminal posture,
+  // in addition to the (differently-timed) terminal WAN-chain window.
+  {
+    CommandLossTimer clt(kSecret);
+    clt.begin(0);
+    clt.sync_wall_clock(kMidnightUnix, 0);
+    clt.tick(24 * 3600 + 16 * 3600);  // T+24h, day 1's 16:00 UTC: window opens
+    assert(clt.fleetone_window_open());
+
+    // Cross into terminal posture (T+48h) while still inside the window
+    // (day 2's 16:00-16:30 UTC slot) — window stays open, and terminal
+    // posture's own entry/window logic also fires independently.
+    auto actions = clt.tick(48 * 3600 + 16 * 3600 + 10 * 60);
+    assert(clt.rung() == Rung::kTerminal);
+    assert(contains(actions, Action::kEnterTerminalPosture));
+    assert(clt.fleetone_window_open());
+    assert(clt.terminal_window_open());
+
+    // Both windows close at their own, independent times: fleetOne at
+    // 16:30 UTC, terminal's WAN-chain window not until 18:00 UTC.
+    actions = clt.tick(48 * 3600 + 16 * 3600 + 30 * 60);
+    assert(!clt.fleetone_window_open());
+    assert(contains(actions, Action::kFleetOneWindowClose));
+    assert(clt.terminal_window_open());  // unaffected — still open until 18:00
+
+    actions = clt.tick(48 * 3600 + 18 * 3600);
+    assert(!clt.terminal_window_open());
+    assert(contains(actions, Action::kTerminalWindowClose));
+  }
+
+  // A valid token reset to Normal closes an open fleetOne window
+  // immediately, same as it does the terminal window.
+  {
+    CommandLossTimer clt(kSecret);
+    clt.begin(0);
+    clt.sync_wall_clock(kMidnightUnix, 0);
+    clt.tick(24 * 3600 + 16 * 3600 + 10 * 60);
+    assert(clt.fleetone_window_open());
+
+    uint64_t now = 24 * 3600 + 16 * 3600 + 10 * 60;
+    auto token = make_token("reboot2.clt.contact", now, kSecret);
+    assert(clt.process_token(token, now, now));
+    auto actions = clt.tick(now);
+    assert(contains(actions, Action::kExitToNormal));
+    assert(contains(actions, Action::kFleetOneWindowClose));
+    assert(!clt.fleetone_window_open());
+    assert(clt.rung() == Rung::kNormal);
+  }
+
+  std::printf("  test_fleetone_window: ok\n");
+}
+
 int main() {
   test_bad_tokens_never_reset();
   test_rungs_fire_and_reset();
   test_terminal_window_ntp_and_drift();
+  test_fleetone_window();
   std::printf("test_command_loss_timer: all assertions passed\n");
   return 0;
 }

@@ -35,6 +35,8 @@ enum class Action {
   kExitToNormal,              // valid token seen from any rung, incl. terminal
   kTerminalWindowOpen,        // terminal posture: entering the daily UTC window
   kTerminalWindowClose,       // terminal posture: leaving the daily UTC window
+  kFleetOneWindowOpen,        // T+24h onward (incl. terminal): entering the daily fleetOne window
+  kFleetOneWindowClose,       // T+24h onward (incl. terminal): leaving the daily fleetOne window
 };
 
 struct Thresholds {
@@ -44,6 +46,15 @@ struct Thresholds {
   uint64_t window_open_utc_secs = 16 * 3600;   // 16:00 UTC
   uint64_t window_close_utc_secs = 18 * 3600;  // 18:00 UTC
   uint64_t auth_window_secs = 600;             // +-10 min replay window
+
+  // FleetOne window (fixer ADR 0055 §6-7): relay 5, NO contact, default
+  // de-energized. Independent of the terminal WAN-chain window above —
+  // starts at T+24h (one rung earlier than terminal posture) and, once
+  // started, keeps firing daily forever, including all through terminal
+  // posture. A suspended satellite service just makes the window's
+  // connection attempt fail; that's harmless by design.
+  uint64_t fleetone_window_open_utc_secs = 16 * 3600;         // 16:00 UTC
+  uint64_t fleetone_window_close_utc_secs = 16 * 3600 + 1800;  // 16:30 UTC
 };
 
 inline const std::string& contact_token_context() {
@@ -83,6 +94,7 @@ class CommandLossTimer {
 
   Rung rung() const { return rung_; }
   bool terminal_window_open() const { return terminal_window_open_; }
+  bool fleetone_window_open() const { return fleetone_window_open_; }
 
   // Advances the state machine. now_mono drives elapsed-since-contact and
   // the terminal window's drift-fallback estimate; call on every loop tick
@@ -107,6 +119,10 @@ class CommandLossTimer {
           if (terminal_window_open_) {
             terminal_window_open_ = false;
             actions.push_back(Action::kTerminalWindowClose);
+          }
+          if (fleetone_window_open_) {
+            fleetone_window_open_ = false;
+            actions.push_back(Action::kFleetOneWindowClose);
           }
           break;
         case Rung::kRung12h:
@@ -140,6 +156,25 @@ class CommandLossTimer {
     // last known window state rather than guess. Once a sync lands, the
     // next tick() picks the window logic up normally.
 
+    // FleetOne window: starts one rung earlier than terminal posture
+    // (T+24h) and, unlike the terminal WAN-chain window, keeps running
+    // through kRung24h *and* kTerminal alike — it is never superseded by
+    // escalation, only cleared by a full reset to Normal above.
+    bool fleetone_active = (rung_ == Rung::kRung24h || rung_ == Rung::kTerminal);
+    if (fleetone_active && wall_clock_.has_estimate()) {
+      uint64_t now_unix = wall_clock_.estimate(now_mono);
+      uint64_t sec_of_day = now_unix % 86400;
+      bool in_window = sec_of_day >= th_.fleetone_window_open_utc_secs &&
+                        sec_of_day < th_.fleetone_window_close_utc_secs;
+      if (in_window && !fleetone_window_open_) {
+        fleetone_window_open_ = true;
+        actions.push_back(Action::kFleetOneWindowOpen);
+      } else if (!in_window && fleetone_window_open_) {
+        fleetone_window_open_ = false;
+        actions.push_back(Action::kFleetOneWindowClose);
+      }
+    }
+
     return actions;
   }
 
@@ -152,6 +187,7 @@ class CommandLossTimer {
   uint64_t last_accepted_token_ts_ = 0;
   Rung rung_ = Rung::kNormal;
   bool terminal_window_open_ = false;
+  bool fleetone_window_open_ = false;
 };
 
 }  // namespace reboot2::clt
