@@ -1,0 +1,25 @@
+kind: Component
+name: reboot2-fw
+owner: cc-reboot2-fw
+system: boat
+summary: >-
+  ESP32-S3 SensESP firmware for the boat's WaveShare 6-relay remote-power/reboot
+  controller (Starlink inverter, cell modem, NarwhalCore, dataHub, FleetOne).
+  Publishes/consumes SignalK electrical.reboot2.* paths; boot fail-safe drives
+  all coils LOW at reset so NC loads stay powered independent of firmware state.
+owns:
+  keywords: [reboot2, relay, WaveShare, ESP32-S3-Relay, SensESP, starlinkInverter, cellModem, pepRouter, dataHub, fleetOne, electrical.reboot2, electrical.commands.reboot, electrical.commands.switch, boot fail-safe, commit-confirm, command-loss-timer]
+  hosts: []
+  schemas: []
+knowledge:
+  - path: README.md
+  - path: docs/observability.md
+  - path: docs/command-loss-timer.md
+  - path: docs/bench-checklist.md
+dependsOn: [centralsk]
+expected:
+  - "pio run (pioarduino_esp32s3 env) builds green"
+  - "host-native g++ unit tests under test/ build and pass"
+  - "boot fail-safe invariant holds: all coils LOW at reset/brownout, independent of WiFi/SignalK state"
+  - "electrical.reboot2.semantics reports \"v2-powered\" on connect and every 60s"
+escalate_to: fixer
