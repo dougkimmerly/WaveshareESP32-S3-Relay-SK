@@ -8,7 +8,7 @@ summary: >-
   Publishes/consumes SignalK electrical.reboot2.* paths; boot fail-safe drives
   all coils LOW at reset so NC loads stay powered independent of firmware state.
 owns:
-  keywords: [reboot2, relay, WaveShare, ESP32-S3-Relay, SensESP, starlinkInverter, cellModem, pepRouter, dataHub, fleetOne, electrical.reboot2, electrical.commands.reboot, electrical.commands.switch, boot fail-safe, commit-confirm, command-loss-timer]
+  keywords: [reboot2, relay, WaveShare, ESP32-S3-Relay, SensESP, starlinkInverter, cellModem relay channel, pepRouter, dataHub, fleetOne, electrical.reboot2, electrical.commands.reboot, electrical.commands.switch, boot fail-safe, commit-confirm, command-loss-timer, modem reboot, WAN failover]
   hosts: []
   schemas: []
 knowledge:
